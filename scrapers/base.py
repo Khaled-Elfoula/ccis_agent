@@ -72,7 +72,13 @@ def _robots_for(client: httpx.Client, host: str) -> RobotFileParser | None:
     return parser
 
 
-def fetch(source_id: str, url: str, force: bool = False) -> Fetched:
+def fetch(
+    source_id: str,
+    url: str,
+    force: bool = False,
+    timeout: float = TIMEOUT,
+    attempts: int = ATTEMPTS,
+) -> Fetched:
     """Download a page with retries, keeping a copy of the HTML on disk."""
     host = urlparse(url).hostname or ""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -88,13 +94,13 @@ def fetch(source_id: str, url: str, force: bool = False) -> Fetched:
             headers["If-Modified-Since"] = meta["last_modified"]
 
     last_error = ""
-    with httpx.Client(headers=headers, timeout=TIMEOUT, follow_redirects=True) as client:
+    with httpx.Client(headers=headers, timeout=timeout, follow_redirects=True) as client:
         robots = _robots_for(client, host)
         if robots is None:
             raise ScrapeError(f"robots.txt for {host} unavailable; skipping {url}")
         if not robots.can_fetch(USER_AGENT, url):
             raise ScrapeError(f"robots.txt disallows {url}")
-        for attempt in range(1, ATTEMPTS + 1):
+        for attempt in range(1, attempts + 1):
             _throttle(host)
             try:
                 response = client.get(url)
@@ -123,6 +129,7 @@ def fetch(source_id: str, url: str, force: bool = False) -> Fetched:
                 if response.status_code not in RETRY_STATUSES:
                     raise ScrapeError(f"{url}: {last_error}")
             logger.warning("%s attempt %d failed: %s", url, attempt, last_error)
-            if attempt < ATTEMPTS:
+            if attempt < attempts:
                 time.sleep(2**attempt)
+    raise ScrapeError(f"{url}: {last_error}")
     raise ScrapeError(f"{url}: {last_error}")

@@ -1,0 +1,55 @@
+{
+  "_note": "DEMO SAMPLE DATA ONLY. Every busy block below is invented for the demo. None of it is a real teaching schedule, and it must never be presented to a user as confirmed availability. Real rows in the office_hours table always win over this file.",
+  "version": 1,
+  "doctors": {
+    "swakeel": {
+      "name_ar": "سامي بن صالح بن أحمد الوكيل",
+      "name_en": "Sami Al-Wakeel",
+      "department": "CE",
+      "busy": [
+        { "day": "Sunday", "start": "09:00", "end": "11:00", "label": "Lecture (demo)" },
+        { "day": "Monday", "start": "13:00", "end": "14:30", "label": "Lab (demo)" },
+        { "day": "Wednesday", "start": "09:00", "end": "10:00", "label": "Meeting (demo)" }
+      ]
+    },
+    "atif": {
+      "name_ar": "عاطف بن محمد العمري",
+      "name_en": "Atif Al-Omari",
+      "department": "SE",
+      "busy": [
+        { "day": "Sunday", "start": "10:00", "end": "12:00", "label": "Lecture (demo)" },
+        { "day": "Tuesday", "start": "08:00", "end": "09:30", "label": "Lecture (demo)" },
+        { "day": "Thursday", "start": "14:00", "end": "16:00", "label": "Lab (demo)" }
+      ]
+    },
+    "zuair": {
+      "name_ar": "منصور بن عبدالعزيز الزعير",
+      "name_en": "Mansour Al-Zuair",
+      "department": "CE",
+      "busy": [
+        { "day": "Sunday", "start": "13:00", "end": "14:00", "label": "Lecture (demo)" },
+        { "day": "Wednesday", "start": "11:00", "end": "12:30", "label": "Lab (demo)" },
+        { "day": "Thursday", "start": "09:00", "end": "10:00", "label": "Office work (demo)" }
+      ]
+    },
+    "salahmadi": {
+      "name_ar": "سعد عبدالله الأحمدي",
+      "name_en": "Saad Al-Ahmadi",
+      "department": "CS",
+      "busy": [
+        { "day": "Sunday", "start": "09:00", "end": "10:30", "label": "Lecture (demo)" },
+        { "day": "Tuesday", "start": "09:00", "end": "10:30", "label": "Lecture (demo)" },
+        { "day": "Thursday", "start": "11:00", "end": "12:00", "label": "Meeting (demo)" }
+      ]
+    },
+    "dalsaeed": {
+      "name_ar": "دعاء حمد السعيد",
+      "name_en": "Doaa Al-Saeed",
+      "department": "IT",
+      "busy": [
+        { "day": "Sunday", "start": "08:00", "end": "09:00", "label": "Lecture (demo)" },
+        { "day": "Monday", "start": "10:00", "end": "11:30", "label": "Lab (demo)" }
+      ]
+    }
+  }
+}

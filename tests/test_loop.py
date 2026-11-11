@@ -38,7 +38,9 @@ class FakeClient:
         return response
 
 
-def make_agent(responses, max_tool_calls: int = 4) -> tuple[Agent, FakeClient]:
+def make_agent(
+    responses, max_tool_calls: int = 4, fallback_model: str = ""
+) -> tuple[Agent, FakeClient]:
     """Build an Agent wired to a fake client."""
     client = FakeClient(responses)
     agent = Agent(
@@ -47,6 +49,7 @@ def make_agent(responses, max_tool_calls: int = 4) -> tuple[Agent, FakeClient]:
         system_prompt="test prompt",
         max_tool_calls=max_tool_calls,
         history_messages=10,
+        fallback_model=fallback_model,
     )
     return agent, client
 
@@ -121,3 +124,39 @@ def test_reset_clears_the_history(recorded_tools):
     agent.reset(7)
     agent.reply(7, "hi")
     assert len(client.requests[1]["contents"]) == 1
+
+
+def test_uses_the_fallback_model_after_the_main_one_fails(monkeypatch):
+    monkeypatch.setattr(loop_module.time, "sleep", lambda _: None)
+    rate_limited = errors.APIError(
+        code=429, response_json={"error": {"code": 429, "message": "rate limit"}}
+    )
+    agent, client = make_agent(
+        [rate_limited, rate_limited, text_response("تم")], fallback_model="backup-model"
+    )
+    assert agent.reply(1, "hi") == "تم"
+    assert [request["model"] for request in client.requests] == [
+        "test-model",
+        "test-model",
+        "backup-model",
+    ]
+
+
+def test_friendly_message_when_the_fallback_also_fails(monkeypatch):
+    monkeypatch.setattr(loop_module.time, "sleep", lambda _: None)
+    rate_limited = errors.APIError(
+        code=429, response_json={"error": {"code": 429, "message": "rate limit"}}
+    )
+    agent, client = make_agent([rate_limited] * 3, fallback_model="backup-model")
+    assert agent.reply(1, "hi") == FRIENDLY_ERROR
+    assert len(client.requests) == 3
+
+
+def test_no_fallback_call_when_both_models_are_the_same(monkeypatch):
+    monkeypatch.setattr(loop_module.time, "sleep", lambda _: None)
+    rate_limited = errors.APIError(
+        code=429, response_json={"error": {"code": 429, "message": "rate limit"}}
+    )
+    agent, client = make_agent([rate_limited, rate_limited], fallback_model="test-model")
+    assert agent.reply(1, "hi") == FRIENDLY_ERROR
+    assert len(client.requests) == 2

@@ -1,10 +1,11 @@
-"""Tests for search_kb against a temporary database."""
+"""Tests for the tools against a temporary database."""
 
 import pytest
 
+import agent.tools as tools_module
 import db as database
 from agent.arabic import search_form
-from agent.tools import execute_tool, search_kb
+from agent.tools import execute_tool, find_contact, search_kb
 
 PAGES = [
     (
@@ -80,3 +81,158 @@ def test_missing_database_is_an_error(tmp_path):
 def test_execute_tool_never_raises(tmp_path):
     assert "error" in execute_tool("no_such_tool", {})
     assert "error" in execute_tool("search_kb", {"unexpected": 1})
+
+
+FACULTY = [
+    (
+        "salahmadi",
+        "سعد عبدالله الأحمدي",
+        "Saad Abdullah AlAhmadi",
+        "أستاذ",
+        "CS",
+        "31",
+        "2179",
+        "salahmadi@ksu.edu.sa",
+    ),
+    (
+        "msalem",
+        "محمد عبدالله السالم",
+        None,
+        "أستاذ مساعد",
+        "CS",
+        "31",
+        "2200",
+        "msalem@ksu.edu.sa",
+    ),
+    (
+        "msalem2",
+        "محمد سعد السالم",
+        None,
+        "محاضر",
+        "CS",
+        "31",
+        "2201",
+        "msalem2@ksu.edu.sa",
+    ),
+    (
+        "mshossain",
+        "محمد شميم حسين",
+        None,
+        "أستاذ",
+        "SE",
+        "31",
+        "2115",
+        None,
+    ),
+]
+
+
+@pytest.fixture()
+def directory(tmp_path, monkeypatch):
+    """A temporary database with four faculty rows and no name overrides."""
+    path = tmp_path / "faculty.sqlite"
+    conn = database.init_db(path)
+    conn.executemany(
+        "INSERT INTO faculty (username, name_ar, name_en, rank, department, building, room, "
+        "email, profile_url, list_url, scraped_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                username,
+                name_ar,
+                name_en,
+                rank,
+                department,
+                building,
+                room,
+                email,
+                f"https://faculty.ksu.edu.sa/ar/{username}",
+                f"https://ccis.ksu.edu.sa/ar/{department.lower()}/faculty-and-staff",
+                "2026-11-10T10:00:00+00:00",
+            )
+            for username, name_ar, name_en, rank, department, building, room, email in FACULTY
+        ],
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(tools_module, "load_overrides", lambda: {})
+    return path
+
+
+def test_find_contact_returns_one_person_with_source_and_date(directory):
+    results = find_contact("د. سعد الاحمدي", db_path=directory)
+    assert len(results) == 1
+    person = results[0]
+    assert person["name"] == "سعد عبدالله الأحمدي"
+    assert person["name_en"] == "Saad Abdullah AlAhmadi"
+    assert person["rank"] == "أستاذ"
+    assert person["department"] == "CS"
+    assert (person["building"], person["room"]) == ("31", "2179")
+    assert person["email"] == "salahmadi@ksu.edu.sa"
+    assert person["profile_url"] == "https://faculty.ksu.edu.sa/ar/salahmadi"
+    assert person["source_url"].endswith("/cs/faculty-and-staff")
+    assert person["scraped_at"] == "2026-11-10T10:00:00+00:00"
+
+
+def test_find_contact_returns_candidates_when_the_name_is_ambiguous(directory):
+    result = find_contact("محمد السالم", db_path=directory)
+    assert result["status"] == "candidates, not confirmed"
+    assert {person["name"] for person in result["candidates"]} == {
+        "محمد عبدالله السالم",
+        "محمد سعد السالم",
+    }
+    assert "did you mean" in result["message"]
+
+
+def test_find_contact_resolves_the_short_english_name(directory):
+    """The demo case: the short English form is him, not a candidate for somebody else."""
+    results = find_contact("Dr. Saad Al-Ahmadi", db_path=directory)
+    assert isinstance(results, list)
+    assert results[0]["name_en"] == "Saad Abdullah AlAhmadi"
+    assert results[0]["email"] == "salahmadi@ksu.edu.sa"
+
+
+def test_find_contact_labels_a_below_threshold_match_as_unconfirmed(directory):
+    """A shared family name only is a question for the user, never an answer."""
+    result = find_contact("Saud AlAhmadi", db_path=directory)
+    assert result["status"] == "candidates, not confirmed"
+    assert [person["name_en"] for person in result["candidates"]] == ["Saad Abdullah AlAhmadi"]
+    assert "did you mean" in result["message"]
+
+
+def test_find_contact_does_not_invent_an_email(directory):
+    results = find_contact("محمد شميم حسين", db_path=directory)
+    person = results[0]
+    assert person["email"] is None
+    assert (person["building"], person["room"]) == ("31", "2115")
+    assert person["profile_url"] == "https://faculty.ksu.edu.sa/ar/mshossain"
+
+
+def test_find_contact_unknown_and_empty_names(directory):
+    assert find_contact("خالد الغامدي", db_path=directory) == {"error": "no match found"}
+    assert find_contact("   ", db_path=directory) == {"error": "empty name"}
+
+
+def test_find_contact_on_an_empty_directory(tmp_path, monkeypatch):
+    monkeypatch.setattr(tools_module, "load_overrides", lambda: {})
+    path = tmp_path / "empty.sqlite"
+    database.init_db(path).close()
+    assert find_contact("سعد الاحمدي", db_path=path) == {"error": "faculty directory is empty"}
+
+
+def test_find_contact_uses_an_override_first(directory, monkeypatch):
+    monkeypatch.setattr(tools_module, "load_overrides", lambda: {"سعد الاحمدي": "msalem2"})
+    results = find_contact("سعد الاحمدي", db_path=directory)
+    assert results[0]["name"] == "محمد سعد السالم"
+
+
+def test_find_contact_missing_database_is_an_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(tools_module, "load_overrides", lambda: {})
+    assert "error" in find_contact("سعد", db_path=tmp_path / "missing.sqlite")
+
+
+def test_execute_tool_runs_find_contact(directory):
+    results = execute_tool(
+        "find_contact", {"person_or_role": "محمد شميم حسين", "db_path": str(directory)}
+    )
+    assert results[0]["name"] == "محمد شميم حسين"
+    assert "error" in execute_tool("find_contact", {})

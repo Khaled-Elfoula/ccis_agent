@@ -20,6 +20,7 @@ def _int(name: str, default: int) -> int:
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 MODEL = os.getenv("MODEL", "")
+MODEL_FALLBACK = os.getenv("MODEL_FALLBACK", "")
 
 MAX_TOOL_CALLS = _int("MAX_TOOL_CALLS", 4)
 HISTORY_MESSAGES = _int("HISTORY_MESSAGES", 10)

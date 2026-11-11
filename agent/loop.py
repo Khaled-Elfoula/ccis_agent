@@ -36,9 +36,11 @@ class Agent:
         system_prompt: str | None = None,
         max_tool_calls: int | None = None,
         history_messages: int | None = None,
+        fallback_model: str | None = None,
     ) -> None:
         self.client = client or genai.Client(api_key=config.GEMINI_API_KEY)
         self.model = model or config.MODEL
+        self.fallback_model = config.MODEL_FALLBACK if fallback_model is None else fallback_model
         self.system_prompt = system_prompt or load_system_prompt()
         self.max_tool_calls = config.MAX_TOOL_CALLS if max_tool_calls is None else max_tool_calls
         self.history_messages = (
@@ -116,21 +118,28 @@ class Agent:
         return (_text(response) if response is not None else "") or FRIENDLY_ERROR
 
     def _generate(self, contents: list[types.Content], with_tools: bool):
-        """Call the model, retrying once on rate limits or transient server errors."""
-        request = {
-            "model": self.model,
-            "contents": contents,
-            "config": types.GenerateContentConfig(
-                system_instruction=self.system_prompt,
-                temperature=0.3,
-                tools=TOOLS if with_tools else None,
-            ),
-        }
-        for attempt in (1, 2):
+        """Call the model, retrying once, then try the fallback model once."""
+        generation_config = types.GenerateContentConfig(
+            system_instruction=self.system_prompt,
+            temperature=0.3,
+            tools=TOOLS if with_tools else None,
+        )
+        response = self._call(self.model, contents, generation_config, attempts=2)
+        if response is None and self.fallback_model and self.fallback_model != self.model:
+            logger.warning(
+                "main model %s failed, trying fallback %s", self.model, self.fallback_model
+            )
+            response = self._call(self.fallback_model, contents, generation_config, attempts=1)
+        return response
+
+    def _call(self, model: str, contents: list[types.Content], generation_config, attempts: int):
+        """Call one model, retrying while the error is transient."""
+        request = {"model": model, "contents": contents, "config": generation_config}
+        for attempt in range(1, attempts + 1):
             try:
                 return self.client.models.generate_content(**request)
             except genai_errors.APIError as exc:
-                if attempt == 1 and _is_retryable(exc):
+                if attempt < attempts and _is_retryable(exc):
                     logger.warning("model call failed (%s), retrying once", exc)
                     time.sleep(RETRY_DELAY)
                     continue
