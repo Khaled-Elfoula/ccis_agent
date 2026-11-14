@@ -9,12 +9,17 @@ from telegram import Update
 
 import config
 from bot.telegram import build_application
+import time
+import urllib.request
 
+_last_inbound = time.time()
 
 class _Health(BaseHTTPRequestHandler):
-    """Answers 'ok' so Render sees an open port."""
+    """Answers 'ok' so Render sees an open port, and records when we were last called."""
 
     def do_GET(self):
+        global _last_inbound
+        _last_inbound = time.time()
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"ok")
@@ -24,6 +29,26 @@ class _Health(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+def start_self_ping(idle_seconds: int = 600) -> None:
+    """If no web request arrived for idle_seconds, request our own public URL.
+
+    Only runs on Render, where RENDER_EXTERNAL_URL is set.
+    """
+    url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not url:
+        return
+
+    def loop() -> None:
+        while True:
+            time.sleep(60)
+            if time.time() - _last_inbound >= idle_seconds:
+                try:
+                    logging.info("self-ping: no web traffic for %s s, requesting %s", idle_seconds, url)
+                    urllib.request.urlopen(url, timeout=30).read()
+                except Exception:
+                    pass
+
+    threading.Thread(target=loop, daemon=True).start()
 
 def start_health_server() -> None:
     """Open the PORT Render expects. Does nothing when PORT is not set (local runs)."""
@@ -44,6 +69,7 @@ def main() -> None:
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     start_health_server()
+    start_self_ping()
 
     missing = [
         name
