@@ -39,9 +39,9 @@ class Fetched:
     not_modified: bool = False
 
 
-def _throttle(host: str) -> None:
-    """Wait until at least MIN_INTERVAL has passed since the last call to this host."""
-    wait = MIN_INTERVAL - (time.monotonic() - _last_request.get(host, 0.0))
+def _throttle(host: str, interval: float = MIN_INTERVAL) -> None:
+    """Wait until at least `interval` seconds have passed since the last call to this host."""
+    wait = interval - (time.monotonic() - _last_request.get(host, 0.0))
     if wait > 0:
         time.sleep(wait)
     _last_request[host] = time.monotonic()
@@ -78,6 +78,7 @@ def fetch(
     force: bool = False,
     timeout: float = TIMEOUT,
     attempts: int = ATTEMPTS,
+    min_interval: float = MIN_INTERVAL,
 ) -> Fetched:
     """Download a page with retries, keeping a copy of the HTML on disk."""
     host = urlparse(url).hostname or ""
@@ -101,7 +102,7 @@ def fetch(
         if not robots.can_fetch(USER_AGENT, url):
             raise ScrapeError(f"robots.txt disallows {url}")
         for attempt in range(1, attempts + 1):
-            _throttle(host)
+            _throttle(host, min_interval)
             try:
                 response = client.get(url)
             except httpx.HTTPError as exc:
@@ -132,4 +133,4 @@ def fetch(
             if attempt < attempts:
                 time.sleep(2**attempt)
     raise ScrapeError(f"{url}: {last_error}")
-    raise ScrapeError(f"{url}: {last_error}")
+

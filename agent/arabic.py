@@ -7,6 +7,8 @@ _TASHKEEL = re.compile(r"[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED]")
 _ALEF = re.compile("[\u0623\u0625\u0622\u0671]")
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 _NON_WORD = re.compile(r"[^\w]+", re.UNICODE)
+_ARABIC_LETTER = re.compile(r"[\u0621-\u064A\u0660-\u0669\u06F0-\u06F9]")
+_LATIN_LETTER = re.compile(r"[A-Za-z]")
 _WHITESPACE = re.compile(r"\s+")
 
 STOPWORDS = frozenset(
@@ -57,3 +59,9 @@ def tokenize(text: str) -> list[str]:
 def fts_query(text: str) -> str:
     """Build an FTS5 OR query with prefix matching from free text."""
     return " OR ".join(f'"{tok}"*' for tok in tokenize(text))
+
+def detect_language(text: str) -> str:
+    """Report the language a message is written in: 'ar' or 'en'."""
+    arabic = len(_ARABIC_LETTER.findall(text or ""))
+    latin = len(_LATIN_LETTER.findall(text or ""))
+    return "ar" if arabic > latin else "en"

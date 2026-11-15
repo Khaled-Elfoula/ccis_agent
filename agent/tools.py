@@ -116,6 +116,9 @@ def _contact(row: dict) -> dict:
         "building": row.get("building"),
         "room": row.get("room"),
         "email": row.get("email"),
+        # A row that has an email but no label predates the column, and every email
+        # stored back then was read off a page.
+        "email_source": (row.get("email_source") or "scraped") if row.get("email") else None,
         "profile_url": row.get("profile_url"),
         "source_url": row.get("list_url"),
         "scraped_at": row.get("scraped_at"),
@@ -187,8 +190,13 @@ FIND_CONTACT_DECLARATION = types.FunctionDeclaration(
     name="find_contact",
     description=(
         "Look up a college member by name and return their contact details: rank, department, office "
-        "(building and room), email, and the profile link. Arabic spelling variants, missing middle "
-        "names and titles such as د. or أ.د. are handled. "
+        "(building and room), email, email_source, and the profile link. Arabic spelling variants, missing "
+        "middle names and titles such as د. or أ.د. are handled. "
+        "email_source says where the email came from: 'scraped' means it was read off the doctor's page and "
+        "can be given normally; 'derived' means it was built from the username in the standard university "
+        "format username@ksu.edu.sa and was not confirmed on the doctor's page; 'derived_unverified' means "
+        "the same but the profile page could not be opened, so it needs double-checking; null means there is "
+        "no email at all. Say which of these applies whenever you give an email. "
         "Returns a list with exactly one person when the match is confirmed. "
         "When the name is not confirmed it returns {status: 'candidates, not confirmed', message, "
         "candidates: [...]}: ask the user 'did you mean X?' and never present a candidate as the answer. "
@@ -445,6 +453,24 @@ def _invented_email(text: str, db_path=None) -> str | None:
     return None
 
 
+def _email_source(email: str | None, db_path=None) -> str | None:
+    """Return where a stored email came from, or None when we do not hold it."""
+    if not email or "@" not in email:
+        return None
+    try:
+        conn = database.connect(db_path or config.DB_PATH)
+        try:
+            row = conn.execute(
+                "SELECT email_source FROM faculty WHERE LOWER(email) = LOWER(?) LIMIT 1",
+                (email.strip(),),
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return (row["email_source"] or "scraped") if row else None
+
+
 def _language(lang: str | None) -> str:
     """Return "ar" or "en", defaulting to English."""
     return "ar" if str(lang or "").strip().lower().startswith("ar") else "en"
@@ -467,6 +493,7 @@ def draft_email(
     return {
         "subject": EMAIL_SUBJECTS[language].format(summary=summary),
         "body": EMAIL_BODIES[language].format(summary=summary),
+        "email_source": _email_source(to, db_path),
     }
 
 
@@ -476,7 +503,9 @@ DRAFT_EMAIL_DECLARATION = types.FunctionDeclaration(
         "Draft a ready-to-send email to a contact about a student's case, in Arabic or English. "
         "Pass the recipient exactly as find_contact or a college page gave it; an email address that is not in "
         "the sources is refused. The body keeps the placeholders [Your name] and [Your ID] for the student to "
-        "fill in, and the agent never sends the email itself. Returns {subject, body}."
+        "fill in, and the agent never sends the email itself. Returns {subject, body, email_source}, where "
+        "email_source is the same label find_contact gave for that address (scraped, derived, "
+        "derived_unverified) or null when the address is not a stored faculty email."
     ),
     parameters=types.Schema(
         type=types.Type.OBJECT,
@@ -520,6 +549,25 @@ def handoff(
     template = draft_email(contact_text, reason_text, lang, db_path)
     if "error" in template:
         return template
+    source = template.get("email_source")
+    note = ""
+    if source == "derived":
+        note = (
+            "\n\nملاحظة: هذا العنوان يتبع صيغة الجامعة القياسية username@ksu.edu.sa ولم يتم التأكد منه من صفحة "
+            "عضو هيئة التدريس."
+            if _language(lang) == "ar"
+            else "\n\nNote: this address follows the university's standard format "
+            "(username@ksu.edu.sa) and was not confirmed on the doctor's page."
+        )
+    elif source == "derived_unverified":
+        note = (
+            "\n\nملاحظة: هذا العنوان يتبع صيغة الجامعة القياسية username@ksu.edu.sa ولم يتم التأكد منه من صفحة "
+            "عضو هيئة التدريس، كما تعذّر فتح صفحته، لذا يُرجى التحقق منه."
+            if _language(lang) == "ar"
+            else "\n\nNote: this address follows the university's standard format "
+            "(username@ksu.edu.sa) and was not confirmed on the doctor's page. The profile page could "
+            "not be opened either, so please double-check it."
+        )
     if _language(lang) == "ar":
         message = (
             f"أحوّل حالتك إلى {contact_text}.\n"
@@ -534,7 +582,7 @@ def handoff(
             f"Ready-to-send email:\n"
             f"Subject: {template['subject']}\n\n{template['body']}"
         )
-    return {"message": message}
+    return {"message": message + note, "email_source": source}
 
 
 HANDOFF_DECLARATION = types.FunctionDeclaration(
@@ -545,8 +593,10 @@ HANDOFF_DECLARATION = types.FunctionDeclaration(
         "Give the reason in one sentence and the contact from find_contact or a college page. "
         "When an office has no published email, pass the office name and its page link and say the email was "
         "not found. An email that is not in the sources is refused. "
-        "Returns {message} with the reason, the contact and a ready email template that keeps the "
-        "placeholders [Your name] and [Your ID]."
+        "Returns {message, email_source} with the reason, the contact and a ready email template that keeps "
+        "the placeholders [Your name] and [Your ID]. When email_source is 'derived' or 'derived_unverified' "
+        "the message already carries the note that the address follows the university's standard format and "
+        "was not confirmed on the doctor's page."
     ),
     parameters=types.Schema(
         type=types.Type.OBJECT,

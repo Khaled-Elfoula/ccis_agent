@@ -1,6 +1,7 @@
 """Parse a faculty profile page: email, office and office hours (spec.md sections 7, 11)."""
 
 import logging
+import random
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -195,18 +196,28 @@ def parse_profile(html: str, url: str) -> Profile:
         name_en=name_en,
         office_hours=parse_office_hours(soup.select_one("section.working_hours")),
     )
-PROFILE_TIMEOUT = 20.0
+PROFILE_TIMEOUT = 10.0
 PROFILE_ATTEMPTS = 2
+PROFILE_INTERVAL = (5.0, 10.0)
 
 
-def fetch_profile(username: str, force: bool = False) -> tuple[Profile, Fetched]:
-    """Download and parse one profile, retrying briefly because these pages are slow."""
+def fetch_profile(
+    username: str,
+    force: bool = False,
+    timeout: float | None = None,
+    attempts: int | None = None,
+    interval: float | None = None,
+) -> tuple[Profile, Fetched]:
+    """Download and parse one profile, politely: 10-15s apart, 10s timeout, 2 attempts."""
     url = PROFILE_URL.format(username=username)
     fetched = fetch(
         f"fac_profile_{username}",
         url,
         force=force,
-        timeout=PROFILE_TIMEOUT,
-        attempts=PROFILE_ATTEMPTS,
+        timeout=PROFILE_TIMEOUT if timeout is None else timeout,
+        attempts=PROFILE_ATTEMPTS if attempts is None else attempts,
+        min_interval=(
+            random.uniform(*PROFILE_INTERVAL) if interval is None else interval
+        ),
     )
     return parse_profile(fetched.html, url), fetched

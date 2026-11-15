@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS faculty (
   building TEXT,
   room TEXT,
   email TEXT,
+  email_source TEXT,         -- 'scraped' | 'derived' | 'derived_unverified'
   phone TEXT,
   profile_url TEXT,
   list_url TEXT,

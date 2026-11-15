@@ -1,6 +1,6 @@
 """Tests for Arabic normalization and FTS query building."""
 
-from agent.arabic import fts_query, normalize_arabic, search_form, tokenize
+from agent.arabic import detect_language, fts_query, normalize_arabic, search_form, tokenize
 
 
 def test_removes_tashkeel_and_tatweel():
@@ -42,3 +42,10 @@ def test_fts_query_is_or_with_prefixes():
 
 def test_fts_query_empty_for_punctuation_only():
     assert fts_query("؟!.") == ""
+
+
+def test_detect_language_follows_the_script():
+    assert detect_language("ما هي شروط القبول؟") == "ar"
+    assert detect_language("What are the admission requirements?") == "en"
+    assert detect_language("سعد الأحمدي office 2179") == "ar"
+    assert detect_language("") == "en"

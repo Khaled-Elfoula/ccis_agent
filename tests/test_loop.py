@@ -160,3 +160,27 @@ def test_no_fallback_call_when_both_models_are_the_same(monkeypatch):
     agent, client = make_agent([rate_limited, rate_limited], fallback_model="test-model")
     assert agent.reply(1, "hi") == FRIENDLY_ERROR
     assert len(client.requests) == 2
+
+
+def test_english_message_asks_for_an_english_reply():
+    agent, client = make_agent([text_response("The college offers four programs.")])
+    agent.reply(1, "What programs does the college offer?")
+    instruction = client.requests[0]["config"].system_instruction
+    assert "written in English" in instruction
+    assert "test prompt" in instruction
+
+
+def test_arabic_message_asks_for_an_arabic_reply():
+    agent, client = make_agent([text_response("تقدم الكلية أربعة برامج.")])
+    agent.reply(1, "ما هي برامج الكلية؟")
+    instruction = client.requests[0]["config"].system_instruction
+    assert "written in Arabic" in instruction
+
+
+def test_the_language_rule_reaches_the_closing_answer(recorded_tools):
+    agent, client = make_agent(
+        [tool_response(f"سؤال {index}") for index in range(4)] + [text_response("توقف")]
+    )
+    agent.reply(1, "What are the transfer conditions?")
+    instruction = client.requests[-1]["config"].system_instruction
+    assert "written in English" in instruction

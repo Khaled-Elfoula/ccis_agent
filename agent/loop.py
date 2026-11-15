@@ -9,8 +9,10 @@ from google.genai import errors as genai_errors
 from google.genai import types
 
 import config
+from agent.arabic import detect_language
 from agent.prompts import load_system_prompt
 from agent.tools import TOOLS, execute_tool
+
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,12 @@ RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 FINAL_NUDGE = (
     "You have reached the tool-call limit for this message. Answer now with what you "
     "already have, or hand off if you still cannot answer."
+)
+LANGUAGE_NAMES = {"ar": "Arabic", "en": "English"}
+LANGUAGE_RULE = (
+    "The user's latest message is written in {name}. Write your whole reply in {name} — "
+    "the greeting, the body, any list and the closing. Do not switch to another language "
+    "because the tool results or the sources are in one."
 )
 
 
@@ -56,7 +64,7 @@ class Agent:
         """Answer one user message, running tool calls until the model stops."""
         history = self._history.setdefault(chat_id, [])
         turn = [*history, types.Content(role="user", parts=[types.Part(text=text)])]
-        answer = self._run(turn)
+        answer = self._run(turn, detect_language(text))
         history.extend(
             [
                 types.Content(role="user", parts=[types.Part(text=text)]),
@@ -66,12 +74,12 @@ class Agent:
         del history[: max(0, len(history) - self.history_messages)]
         return answer
 
-    def _run(self, contents: list[types.Content]) -> str:
+    def _run(self, contents: list[types.Content], language: str = "en") -> str:
         """Drive the tool-call loop for one turn, within the call budget."""
         seen: set[str] = set()
         calls = 0
         while True:
-            response = self._generate(contents, with_tools=True)
+            response = self._generate(contents, with_tools=True, language=language)
             if response is None:
                 return FRIENDLY_ERROR
             function_calls = response.function_calls or []
@@ -109,18 +117,18 @@ class Agent:
                 )
 
             if calls >= self.max_tool_calls or executed == 0:
-                return self._final_answer(contents)
+                return self._final_answer(contents, language)
 
-    def _final_answer(self, contents: list[types.Content]) -> str:
+    def _final_answer(self, contents: list[types.Content], language: str = "en") -> str:
         """Ask for a closing answer without tools once the budget is spent."""
         contents.append(types.Content(role="user", parts=[types.Part(text=FINAL_NUDGE)]))
-        response = self._generate(contents, with_tools=False)
+        response = self._generate(contents, with_tools=False, language=language)
         return (_text(response) if response is not None else "") or FRIENDLY_ERROR
 
-    def _generate(self, contents: list[types.Content], with_tools: bool):
+    def _generate(self, contents: list[types.Content], with_tools: bool, language: str = "en"):
         """Call the model, retrying once, then try the fallback model once."""
         generation_config = types.GenerateContentConfig(
-            system_instruction=self.system_prompt,
+            system_instruction=_system_instruction(self.system_prompt, language),
             temperature=0.3,
             tools=TOOLS if with_tools else None,
         )
@@ -163,3 +171,8 @@ def _is_retryable(exc: genai_errors.APIError) -> bool:
     """True for rate limits and transient server errors."""
     code = getattr(exc, "code", None)
     return code in RETRYABLE_STATUS or "429" in str(exc)
+
+def _system_instruction(base: str, language: str) -> str:
+    """Add the per-message language rule to the system prompt."""
+    name = LANGUAGE_NAMES.get(language, LANGUAGE_NAMES["en"])
+    return f"{base}\n\n{LANGUAGE_RULE.format(name=name)}"

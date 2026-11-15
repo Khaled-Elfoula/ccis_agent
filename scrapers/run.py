@@ -1,7 +1,7 @@
 """Fill the knowledge base and faculty tables: python -m scrapers.run [--only ID] [--faculty]."""
-
 import argparse
 import logging
+import time
 from datetime import datetime, timezone
 
 import config
@@ -13,6 +13,9 @@ from scrapers.base import CACHE_DIR, ScrapeError, fetch
 from scrapers.sources import FACULTY_LISTS, FACULTY_LISTS_BY_ID, SOURCES, SOURCES_BY_ID
 
 logger = logging.getLogger("scrapers.run")
+MAX_CONSECUTIVE_FAILURES = 3
+MAX_PROFILE_SECONDS = 30.0
+THROTTLE_MARKERS = ("HTTP 403", "HTTP 429", "timed out", "timeout")
 
 
 def store_page(conn, source_id: str, url: str, parsed: ccis.ParsedPage) -> int:
@@ -70,7 +73,7 @@ def main() -> None:
     parser.add_argument("--faculty", action="store_true", help="Scrape faculty lists and profiles")
     parser.add_argument("--max-profiles", type=int, help="Fetch at most this many profiles")
     parser.add_argument(
-        "--resume", action="store_true", help="Skip profiles already fetched today"
+        "--resume", action="store_true", help="Skip profiles already downloaded"
     )
 
     args = parser.parse_args()
@@ -89,10 +92,10 @@ def main() -> None:
 FACULTY_UPSERT = """
 INSERT INTO faculty (
   username, name_ar, name_en, name_norm, rank, department,
-  building, room, email, phone, profile_url, list_url, scraped_at
+  building, room, email, email_source, phone, profile_url, list_url, scraped_at
 ) VALUES (
   :username, :name_ar, :name_en, :name_norm, :rank, :department,
-  :building, :room, :email, :phone, :profile_url, :list_url, :scraped_at
+  :building, :room, :email, :email_source, :phone, :profile_url, :list_url, :scraped_at
 )
 ON CONFLICT(username) DO UPDATE SET
   name_ar = excluded.name_ar,
@@ -103,6 +106,7 @@ ON CONFLICT(username) DO UPDATE SET
   building = excluded.building,
   room = excluded.room,
   email = excluded.email,
+  email_source = excluded.email_source,
   phone = excluded.phone,
   profile_url = excluded.profile_url,
   list_url = excluded.list_url,
@@ -135,6 +139,14 @@ def store_faculty(
         profile.name_en if profile else None,
         existing["name_en"] if existing else None,
     )
+    # A freshly scraped email always wins and is labelled scraped. When the page has no
+    # email, keep the one we already had (a derived one included) and its label.
+    if profile is not None and profile.email:
+        email, email_source = profile.email, "scraped"
+    elif existing is not None and existing["email"]:
+        email, email_source = existing["email"], existing["email_source"] or "scraped"
+    else:
+        email, email_source = None, None
     values = {
         "username": username,
         "name_ar": name_ar,
@@ -159,10 +171,8 @@ def store_faculty(
             profile.room if profile else None,
             existing["room"] if existing else None,
         ),
-        "email": pick(
-            profile.email if profile else None,
-            existing["email"] if existing else None,
-        ),
+        "email": email,
+        "email_source": email_source,
         "phone": pick(
             row.phone if row else None,
             existing["phone"] if existing else None,
@@ -200,13 +210,9 @@ def store_office_hours(conn, faculty_id: int, hours, source_url: str, scraped_at
     return len(hours)
 
 
-def _profile_fetched_today(username: str) -> bool:
-    """True when this profile already has a cached copy from today."""
-    cache_file = CACHE_DIR / f"fac_profile_{username}.html"
-    if not cache_file.exists():
-        return False
-    fetched = datetime.fromtimestamp(cache_file.stat().st_mtime, timezone.utc)
-    return fetched.date() == datetime.now(timezone.utc).date()
+def _profile_cached(username: str) -> bool:
+    """True when this profile already has a downloaded copy we can keep."""
+    return (CACHE_DIR / f"fac_profile_{username}.html").exists()
 
 
 def run_faculty(
@@ -242,24 +248,39 @@ def run_faculty(
 
         usernames = list(dict.fromkeys(usernames))
         if resume:
-            usernames = [name for name in usernames if not _profile_fetched_today(name)]
+            usernames = [name for name in usernames if not _profile_cached(name)]
         if max_profiles is not None:
             usernames = usernames[:max_profiles]
+        consecutive = 0
         for index, username in enumerate(usernames, start=1):
             scraped_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            started = time.monotonic()
             try:
                 profile, fetched = profiles.fetch_profile(username, force=force)
             except (ScrapeError, ccis.ParseError) as exc:
                 logger.error("profile %s: %s (existing data kept)", username, exc)
                 skipped.append(f"profile {username}: {exc}")
                 failures += 1
+                if any(marker in str(exc) for marker in THROTTLE_MARKERS):
+                    consecutive += 1
+                    if consecutive >= MAX_CONSECUTIVE_FAILURES:
+                        logger.error("host looks throttled; stopping after %d failures", consecutive)
+                        print(f"STOPPED: {consecutive} consecutive failures, data kept")
+                        break
+                else:
+                    consecutive = 0
                 continue
+            consecutive = 0
             faculty_id = store_faculty(conn, username, scraped_at, profile=profile)
             count = store_office_hours(
                 conn, faculty_id, profile.office_hours, profile.source_url, scraped_at
             )
             note = " (not modified)" if fetched.not_modified else ""
             print(f"  profile {index:3}/{len(usernames)} {username:20} {count} hours{note}")
+            if time.monotonic() - started > MAX_PROFILE_SECONDS:
+                logger.error("profile %s took over %.0fs; stopping", username, time.monotonic() - started)
+                print("STOPPED: host is slow, data kept")
+                break
     finally:
         conn.close()
     for line in skipped:
