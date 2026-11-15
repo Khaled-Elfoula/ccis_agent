@@ -26,7 +26,5 @@ MAX_TOOL_CALLS = _int("MAX_TOOL_CALLS", 4)
 HISTORY_MESSAGES = _int("HISTORY_MESSAGES", 10)
 STALE_AFTER_DAYS = _int("STALE_AFTER_DAYS", 30)
 
-WORK_DAY_START = os.getenv("WORK_DAY_START", "08:00")
-WORK_DAY_END = os.getenv("WORK_DAY_END", "16:00")
-
+DB_PATH = Path(os.getenv("DB_PATH") or ROOT / "db" / "ccis.sqlite")
 DB_PATH = Path(os.getenv("DB_PATH") or ROOT / "db" / "ccis.sqlite")

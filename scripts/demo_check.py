@@ -1,5 +1,4 @@
-"""Run the eight demo messages through the real agent and show the tools it called.
-
+"""Run the twelve demo messages through the real agent and show the tools it called.
 Usage: py scripts/demo_check.py
 """
 
@@ -19,7 +18,11 @@ MESSAGES = [
     "How do I transfer to the college?",
     "What are the office and email of Dr. Saad Abdullah AlAhmadi?",
     "And Dr. Saad Abdallah AlAhmadi?",
-    "When is Dr. Sami Alwakeel free on Sunday?",
+    "When is Dr. Saad AlAhmadi free on Sunday?",
+    "What about Dr. Duaa AlSaeed on Tuesday?",
+    "When is Dr. Sami Alwakeel free?",
+    "When are the final exams for the first semester?",
+    "What is the last day to drop a course?",
     "I want to withdraw from a course after the deadline.",
     "What's the cafeteria menu?",
 ]

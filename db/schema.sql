@@ -68,3 +68,17 @@ CREATE TABLE IF NOT EXISTS office_hours (
 );
 
 CREATE INDEX IF NOT EXISTS office_hours_faculty_idx ON office_hours(faculty_id);
+
+CREATE TABLE IF NOT EXISTS calendar_events (
+  id INTEGER PRIMARY KEY,
+  academic_year TEXT NOT NULL,   -- from the page title, e.g. "2026-2027"
+  term TEXT,                     -- semester header as the page writes it
+  title TEXT NOT NULL,
+  weekday TEXT,                  -- as the page writes it
+  date_gregorian TEXT NOT NULL,   -- ISO YYYY-MM-DD
+  date_hijri TEXT,               -- YYYY-MM-DD, e.g. "1448-03-10"
+  source_url TEXT NOT NULL,
+  scraped_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS calendar_events_date_idx ON calendar_events(date_gregorian);

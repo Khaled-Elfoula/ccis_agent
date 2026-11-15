@@ -1,54 +1,10 @@
-"""Tests for get_free_slots, draft_email and handoff against a temporary database."""
+"""Tests for get_office_hours, draft_email and handoff against a temporary database."""
 
+import db as database
 import agent.tools as tools_module
-from agent.tools import (
-    HANDLERS,
-    draft_email,
-    free_slots_for_day,
-    get_free_slots,
-    handoff,
-    normalize_day,
-)
+from agent.tools import HANDLERS, draft_email, get_office_hours, handoff, normalize_day
 
-SUNDAY_WITH_TEN_TO_ELEVEN = [
-    {"day": "Sunday", "start": "08:00", "end": "09:00"},
-    {"day": "Sunday", "start": "11:00", "end": "16:00"},
-]
-
-
-def test_free_slots_for_day_subtracts_busy_blocks():
-    busy = [{"day": "Sunday", "start": "09:00", "end": "11:00"}]
-    assert free_slots_for_day("Sunday", busy) == SUNDAY_WITH_TEN_TO_ELEVEN
-
-
-def test_free_slots_for_day_drops_gaps_shorter_than_thirty_minutes():
-    busy = [
-        {"day": "Sunday", "start": "09:00", "end": "09:50"},
-        {"day": "Sunday", "start": "10:10", "end": "11:00"},
-    ]
-    assert free_slots_for_day("Sunday", busy) == SUNDAY_WITH_TEN_TO_ELEVEN
-
-
-def test_free_slots_for_day_merges_overlapping_blocks_and_clips_the_window():
-    busy = [
-        {"day": "Sunday", "start": "07:00", "end": "09:00"},
-        {"day": "Sunday", "start": "10:00", "end": "12:00"},
-        {"day": "Sunday", "start": "11:00", "end": "13:00"},
-        {"day": "Monday", "start": "08:00", "end": "16:00"},
-    ]
-    assert free_slots_for_day("Sunday", busy) == [
-        {"day": "Sunday", "start": "09:00", "end": "10:00"},
-        {"day": "Sunday", "start": "13:00", "end": "16:00"},
-    ]
-
-
-def test_free_slots_for_day_ignores_broken_blocks_and_a_free_day_is_the_window():
-    assert free_slots_for_day("Tuesday", [{"day": "Sunday", "start": "09:00", "end": "11:00"}]) == [
-        {"day": "Tuesday", "start": "08:00", "end": "16:00"}
-    ]
-    assert free_slots_for_day("Sunday", [{"day": "Sunday", "start": "11:00", "end": "oops"}]) == [
-        {"day": "Sunday", "start": "08:00", "end": "16:00"}
-    ]
+WITHHOURS_SUNDAY = [{"day": "Sunday", "start": "10:00", "end": "11:00"}]
 
 
 def test_normalize_day_accepts_english_and_arabic():
@@ -58,81 +14,63 @@ def test_normalize_day_accepts_english_and_arabic():
     assert normalize_day("yesterday") is None
 
 
-def test_office_hours_basis(faculty_db, sample_file):
-    result = get_free_slots(
-        "د. سعد الاحمدي", db_path=faculty_db, sample_path=sample_file
-    )
-    assert result["basis"] == "office_hours"
-    assert result["slots"] == [
+def test_office_hours_are_returned_with_source_and_date(faculty_db):
+    result = get_office_hours("د. سعد الاحمدي", db_path=faculty_db)
+    assert result["office_hours"] == [
         {"day": "Sunday", "start": "10:00", "end": "11:00"},
         {"day": "Tuesday", "start": "12:00", "end": "13:00"},
     ]
     assert result["faculty"]["name"] == "سعد عبدالله الأحمدي"
     assert result["source_url"] == "https://faculty.ksu.edu.sa/ar/withhours"
     assert result["scraped_at"] == "2026-11-10T10:00:00+00:00"
+    assert "no_office_hours" not in result
 
 
-def test_office_hours_win_over_sample_data(faculty_db, sample_file):
-    result = get_free_slots("سعد الاحمدي", "Sunday", db_path=faculty_db, sample_path=sample_file)
-    assert result["basis"] == "office_hours"
-    assert result["slots"] == [{"day": "Sunday", "start": "10:00", "end": "11:00"}]
+def test_a_day_filter_accepts_english_and_arabic(faculty_db):
+    for day in ("Sunday", "الأحد"):
+        result = get_office_hours("سعد الاحمدي", day, db_path=faculty_db)
+        assert result["office_hours"] == WITHHOURS_SUNDAY
+        assert result["day"] == "Sunday"
 
 
-def test_sample_data_basis_when_there_are_no_office_hours(faculty_db, sample_file):
-    result = get_free_slots(
-        "سامي بن صالح الوكيل", "Sunday", db_path=faculty_db, sample_path=sample_file
-    )
-    assert result["basis"] == "sample_data"
-    assert result["slots"] == SUNDAY_WITH_TEN_TO_ELEVEN
-    assert result["source_url"] == "data/sample_schedules.json"
-    assert result["faculty"]["email"] == "swakeel@ksu.edu.sa"
+def test_a_day_without_published_hours_is_an_empty_list(faculty_db):
+    result = get_office_hours("سعد الاحمدي", "Monday", db_path=faculty_db)
+    assert result["office_hours"] == []
+    assert result["day"] == "Monday"
+    assert "no_office_hours" not in result
 
 
-def test_sample_data_returns_the_whole_week_and_accepts_an_arabic_day(faculty_db, sample_file):
-    week = get_free_slots("سامي الوكيل", db_path=faculty_db, sample_path=sample_file)
-    arabic = get_free_slots("سامي الوكيل", "الأحد", db_path=faculty_db, sample_path=sample_file)
-    assert [slot["day"] for slot in week["slots"]] == [
-        "Sunday",
-        "Sunday",
-        "Monday",
-        "Tuesday",
-        "Wednesday",
-        "Thursday",
-    ]
-    assert arabic["slots"] == SUNDAY_WITH_TEN_TO_ELEVEN
+def test_no_office_hours_returns_the_contact_details(faculty_db):
+    result = get_office_hours("سامي الوكيل", db_path=faculty_db)
+    assert result["no_office_hours"] is True
+    assert "office_hours" not in result
+    assert result["email"] == "swakeel@ksu.edu.sa"
+    assert result["email_source"] == "scraped"
+    assert result["office"] == {"building": None, "room": "2206"}
+    assert result["profile_url"] == "https://faculty.ksu.edu.sa/ar/sampleonly"
 
 
-def test_the_short_english_name_finds_the_right_doctor(faculty_db, sample_file):
-    """The demo case, through get_free_slots: Dr. Saad Al-Ahmadi is the CS doctor."""
-    result = get_free_slots("Dr. Saad Al-Ahmadi", db_path=faculty_db, sample_path=sample_file)
-    assert result["basis"] == "office_hours"
+def test_the_short_english_name_finds_the_right_doctor(faculty_db):
+    """The demo case: Dr. Saad Al-Ahmadi is the CS doctor."""
+    result = get_office_hours("Dr. Saad Al-Ahmadi", db_path=faculty_db)
     assert result["faculty"]["name"] == "سعد عبدالله الأحمدي"
     assert result["faculty"]["email"] == "salahmadi@ksu.edu.sa"
+    assert result["office_hours"] == [
+        {"day": "Sunday", "start": "10:00", "end": "11:00"},
+        {"day": "Tuesday", "start": "12:00", "end": "13:00"},
+    ]
 
 
-def test_both_wakeel_spellings_reach_the_sample_schedule(faculty_db, sample_file):
-    for name in ("Sami Alwakeel", "Sami Al-Wakeel"):
-        result = get_free_slots(name, "Sunday", db_path=faculty_db, sample_path=sample_file)
-        assert result["basis"] == "sample_data"
-        assert result["slots"] == SUNDAY_WITH_TEN_TO_ELEVEN
-
-
-def test_an_unconfirmed_name_is_labelled_not_answered(faculty_db, sample_file):
-    """A shared family name only must come back as a question, with no slots attached."""
-    result = get_free_slots("Saud AlAhmadi", db_path=faculty_db, sample_path=sample_file)
+def test_an_unconfirmed_name_is_labelled_not_answered(faculty_db):
+    """A shared family name only must come back as a question, with no hours attached."""
+    result = get_office_hours("Saud AlAhmadi", db_path=faculty_db)
     assert result["status"] == "candidates, not confirmed"
-    assert "slots" not in result
+    assert "office_hours" not in result
     assert [person["name"] for person in result["candidates"]] == ["سعد عبدالله الأحمدي"]
 
 
-def test_no_schedule_data(faculty_db, sample_file):
-    assert get_free_slots("محمد شميم حسين", db_path=faculty_db, sample_path=sample_file) == {
-        "error": "no schedule data"
-    }
-
-
-def test_ambiguous_name_returns_candidates(faculty_db, sample_file):
-    result = get_free_slots("محمد السالم", db_path=faculty_db, sample_path=sample_file)
+def test_ambiguous_name_returns_candidates(faculty_db):
+    result = get_office_hours("محمد السالم", db_path=faculty_db)
     assert result["status"] == "candidates, not confirmed"
     assert {person["name"] for person in result["candidates"]} == {
         "محمد عبدالله السالم",
@@ -141,21 +79,44 @@ def test_ambiguous_name_returns_candidates(faculty_db, sample_file):
     assert "did you mean" in result["message"]
 
 
-def test_unknown_name_unknown_day_and_missing_sample_file(faculty_db, tmp_path):
-    assert get_free_slots("خالد الغامدي", db_path=faculty_db) == {"error": "no match found"}
-    assert get_free_slots("سامي الوكيل", "yesterday", db_path=faculty_db) == {
+def test_unknown_name_unknown_day_and_empty_name(faculty_db):
+    assert get_office_hours("خالد الغامدي", db_path=faculty_db) == {"error": "no match found"}
+    assert get_office_hours("سعد الاحمدي", "yesterday", db_path=faculty_db) == {
         "error": "unknown day: yesterday"
     }
-    missing = tmp_path / "missing.json"
-    assert get_free_slots("سامي الوكيل", db_path=faculty_db, sample_path=missing) == {
-        "error": "no schedule data"
-    }
+    assert get_office_hours("   ", db_path=faculty_db) == {"error": "empty name"}
 
 
-def test_free_slots_never_books_anything(faculty_db, sample_file):
-    result = get_free_slots("سامي الوكيل", db_path=faculty_db, sample_path=sample_file)
+def test_unreadable_published_rows_are_counted_not_reported(faculty_db):
+    conn = database.connect(faculty_db)
+    faculty_id = conn.execute("SELECT id FROM faculty WHERE username = 'dup1'").fetchone()["id"]
+    conn.executemany(
+        "INSERT INTO office_hours (faculty_id, day, start, end, source_url, scraped_at)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (faculty_id, "Sunday", "16:23", "15:23", "https://faculty.ksu.edu.sa/ar/dup1", "2026-11-10T10:00:00+00:00"),
+            (faculty_id, "Monday", "09:00", "10:00", "https://faculty.ksu.edu.sa/ar/dup1", "2026-11-10T10:00:00+00:00"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    result = get_office_hours("محمد عبدالله السالم", db_path=faculty_db)
+    assert result["office_hours"] == [{"day": "Monday", "start": "09:00", "end": "10:00"}]
+    assert result["unreadable_rows"] == 1
+
+
+def test_office_hours_never_books_anything(faculty_db):
+    result = get_office_hours("سعد الاحمدي", db_path=faculty_db)
     assert "booked" not in result
-    assert set(HANDLERS) == {"search_kb", "find_contact", "get_free_slots", "draft_email", "handoff"}
+    assert set(HANDLERS) == {
+        "search_kb",
+        "get_calendar",
+        "find_contact",
+        "get_office_hours",
+        "draft_email",
+        "handoff",
+    }
 
 
 def test_draft_email_arabic_and_english(faculty_db):
@@ -209,15 +170,10 @@ def test_handoff_refuses_an_invented_contact(faculty_db):
     assert result == {"error": "contact not found in sources: advisor@nowhere.com"}
 
 
-def test_execute_tool_runs_the_new_tools(faculty_db, sample_file):
+def test_execute_tool_runs_the_office_hours_tool(faculty_db):
     result = tools_module.execute_tool(
-        "get_free_slots",
-        {
-            "faculty_name": "سامي الوكيل",
-            "day": "Sunday",
-            "db_path": str(faculty_db),
-            "sample_path": str(sample_file),
-        },
+        "get_office_hours",
+        {"faculty_name": "سعد الاحمدي", "day": "Sunday", "db_path": str(faculty_db)},
     )
-    assert result["basis"] == "sample_data"
-    assert "error" in tools_module.execute_tool("get_free_slots", {"day": "Sunday"})
+    assert result["office_hours"] == WITHHOURS_SUNDAY
+    assert "error" in tools_module.execute_tool("get_office_hours", {"day": "Sunday"})

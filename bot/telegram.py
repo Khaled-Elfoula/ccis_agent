@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from collections import defaultdict, deque
+from datetime import datetime, timezone
 from time import monotonic
 
 from telegram import Update
@@ -38,10 +39,11 @@ HELP_TEXT = (
     "2. Admission requirements and steps\n"
     "3. Academic calendar dates and deadlines\n"
     "4. Advisor and faculty contacts\n"
-    "5. Free slots on a faculty schedule (never booking)\n"
+    "5. A faculty member's published office hours (never booking)\n"
     "6. Complex cases: contact plus an email template in Arabic or English\n\n"
     "أستطيع المساعدة في: البرامج والأقسام، شروط القبول، المواعيد، بيانات المرشد "
-    "وأعضاء هيئة التدريس، الأوقات المتاحة، وتحويل الحالات المعقدة مع قالب بريد.\n"
+    "وأعضاء هيئة التدريس، الساعات المكتبية المنشورة، وتحويل الحالات المعقدة مع قالب بريد.\n"
+    "/reset لمسح المحادثة."
     "/reset لمسح المحادثة."
 )
 
@@ -49,6 +51,31 @@ RESET_TEXT = "Conversation cleared. تم مسح المحادثة."
 ONLY_TEXT = "I can only read text messages. أستطيع قراءة الرسائل النصية فقط."
 TOO_MANY_TEXT = "One moment please, that's a lot of messages. لحظة من فضلك، أرسلت رسائل كثيرة."
 
+TOOL_INTENTS = {
+    "search_kb": "kb",
+    "get_calendar": "calendar",
+    "find_contact": "contact",
+    "get_office_hours": "office_hours",
+    "draft_email": "email_template",
+    "handoff": "handoff",
+}
+
+
+def turn_intent(tools: list[str]) -> str:
+    """Label what a turn was about, taken from the tools it used."""
+    labels = [TOOL_INTENTS[name] for name in tools if name in TOOL_INTENTS]
+    return ",".join(dict.fromkeys(labels)) or "answer"
+
+
+def log_turn(chat_id: int, tools: list[str]) -> None:
+    """Log one finished turn: chat, time, intent and tools. Never the message text."""
+    logger.info(
+        "chat=%s time=%s intent=%s tools=%s",
+        chat_id,
+        datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        turn_intent(tools),
+        ",".join(tools) or "none",
+    )
 
 def split_message(text: str, limit: int = MAX_MESSAGE_CHARS) -> list[str]:
     """Split a reply into pieces under the limit, preferring line breaks."""
@@ -123,6 +150,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text(TOO_MANY_TEXT)
         return
     answer = await _answer(update, context, update.effective_message.text)
+    agent = context.application.bot_data["agent"]
+    log_turn(chat_id, agent.last_tools.get(chat_id, []))
     for piece in split_message(answer):
         await update.effective_message.reply_text(piece)
 
@@ -143,6 +172,7 @@ async def _answer(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
         if not task.done():
             await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
     if task.exception() is not None:
-        logger.error("agent failed: %s", task.exception())
+        logger.error("chat=%s agent failed: %s", chat_id, type(task.exception()).__name__)
+        return FRIENDLY_ERROR
         return FRIENDLY_ERROR
     return task.result()

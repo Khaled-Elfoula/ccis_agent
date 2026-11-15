@@ -146,58 +146,50 @@ def test_case2_arabic_question_gets_an_arabic_answer(kb):
     assert "Reply in the language the user wrote in" in load_system_prompt()
 
 
-def test_case3_free_slots_state_the_basis_and_book_nothing(faculty_db, sample_file):
-    """§14.3: slots are returned with a basis, and nothing is booked."""
+def test_case3_office_hours_are_labelled_and_nothing_is_booked(faculty_db):
+    """§14.3: published office hours are returned with a source, and nothing is booked."""
     agent, client = make_agent(
         [
             tool_response(
-                "get_free_slots",
+                "get_office_hours",
                 {
-                    "faculty_name": "سامي الوكيل",
+                    "faculty_name": "سعد الاحمدي",
                     "day": "Sunday",
                     "db_path": str(faculty_db),
-                    "sample_path": str(sample_file),
                 },
             ),
             text_response(
-                "These are demo sample data, not confirmed availability: Sunday 08:00-09:00 "
-                "and 11:00-16:00. Nothing was booked."
+                "Dr. Saad's published office hours on Sunday are 10:00-11:00 "
+                "(https://faculty.ksu.edu.sa/ar/withhours). Nothing was booked."
             ),
         ]
     )
-    answer = agent.reply(1, "When is Dr. Alwakeel free on Sunday?")
+    answer = agent.reply(1, "When is Dr. Saad AlAhmadi free on Sunday?")
     result = tool_results(client)[0]
-    assert result["basis"] == "sample_data"
-    assert result["slots"]
-    assert "not confirmed availability" in answer
+    assert result["office_hours"] == [{"day": "Sunday", "start": "10:00", "end": "11:00"}]
+    assert result["source_url"] == "https://faculty.ksu.edu.sa/ar/withhours"
+    assert "published office hours" in answer
     assert "Nothing was booked" in answer
 
 
-def test_case4_booking_request_offers_slots_and_email_without_booking(faculty_db, sample_file):
-    """§14.4: no tool can book, so the answer offers slots and the email instead."""
+def test_case4_booking_request_offers_hours_and_email_without_booking(faculty_db):
+    """§14.4: no tool can book, so the answer offers the published hours or the email."""
     agent, client = make_agent(
         [
             tool_response(
-                "get_free_slots",
-                {
-                    "faculty_name": "سامي الوكيل",
-                    "db_path": str(faculty_db),
-                    "sample_path": str(sample_file),
-                },
-            ),
-            tool_response(
-                "find_contact", {"person_or_role": "سامي الوكيل", "db_path": str(faculty_db)}
+                "get_office_hours", {"faculty_name": "سامي الوكيل", "db_path": str(faculty_db)}
             ),
             text_response(
-                "I can't book it. Free times: Sunday 08:00-09:00 and 11:00-16:00. "
-                "To request a time, email swakeel@ksu.edu.sa."
+                "I can't book it. Dr. Alwakeel has no published office hours, "
+                "but you can email swakeel@ksu.edu.sa to ask for a time."
             ),
         ]
     )
     answer = agent.reply(1, "Book me an appointment with Dr. Alwakeel")
-    slots, contact = tool_results(client)
-    assert slots["slots"]
-    assert contact[0]["email"] == "swakeel@ksu.edu.sa"
+    result = tool_results(client)[0]
+    assert result["no_office_hours"] is True
+    assert result["email"] == "swakeel@ksu.edu.sa"
+    assert result["email_source"] == "scraped"
     assert "I can't book it" in answer
     assert not {"book", "reserve", "appointment", "schedule_meeting"} & set(HANDLERS)
 

@@ -1,4 +1,7 @@
-"""Fill the knowledge base and faculty tables: python -m scrapers.run [--only ID] [--faculty]."""
+"""Refresh the stored data: python -m scrapers.run [--all | --faculty | --calendar] [--only ID].
+
+Data is refreshed by hand, then the database is committed. Nothing runs on a schedule.
+"""
 import argparse
 import logging
 import time
@@ -9,13 +12,21 @@ import db as database
 from agent.arabic import search_form
 from agent.names import normalize_name
 from scrapers import ccis, faculty, profiles
+from scrapers import calendar as ksu_calendar
 from scrapers.base import CACHE_DIR, ScrapeError, fetch
-from scrapers.sources import FACULTY_LISTS, FACULTY_LISTS_BY_ID, SOURCES, SOURCES_BY_ID
+from scrapers.sources import (
+    CALENDAR,
+    FACULTY_LISTS,
+    FACULTY_LISTS_BY_ID,
+    SOURCES,
+    SOURCES_BY_ID,
+)
 
 logger = logging.getLogger("scrapers.run")
 MAX_CONSECUTIVE_FAILURES = 3
 MAX_PROFILE_SECONDS = 30.0
 THROTTLE_MARKERS = ("HTTP 403", "HTTP 429", "timed out", "timeout")
+TABLES = ("pages", "chunks", "faculty", "office_hours", "calendar_events")
 
 
 def store_page(conn, source_id: str, url: str, parsed: ccis.ParsedPage) -> int:
@@ -42,35 +53,128 @@ def store_page(conn, source_id: str, url: str, parsed: ccis.ParsedPage) -> int:
     return len(parsed.chunks)
 
 
-def run(only: set[str] | None = None, force: bool = False) -> int:
-    """Scrape the selected sources and return the number of failures."""
-    conn = database.init_db(config.DB_PATH)
+def scrape_pages(conn, only: set[str] | None = None, force: bool = False) -> int:
+    """Scrape the college pages, returning the number of failures."""
     failures = 0
+    for source in SOURCES:
+        if only and source.id not in only:
+            continue
+        try:
+            fetched = fetch(source.id, source.url, force=force)
+            parsed = ccis.parse(fetched.html)
+            count = store_page(conn, source.id, source.url, parsed)
+        except (ScrapeError, ccis.ParseError) as exc:
+            logger.error("%s: %s (existing data kept)", source.id, exc)
+            failures += 1
+            continue
+        note = " (not modified)" if fetched.not_modified else ""
+        print(f"{source.id:22} {count:3} chunks  {parsed.title}{note}")
+    return failures
+
+
+def run(only: set[str] | None = None, force: bool = False) -> int:
+    """Scrape the selected college pages and return the number of failures."""
+    conn = database.init_db(config.DB_PATH)
     try:
-        for source in SOURCES:
-            if only and source.id not in only:
-                continue
-            try:
-                fetched = fetch(source.id, source.url, force=force)
-                parsed = ccis.parse(fetched.html)
-                count = store_page(conn, source.id, source.url, parsed)
-            except (ScrapeError, ccis.ParseError) as exc:
-                logger.error("%s: %s (existing data kept)", source.id, exc)
-                failures += 1
-                continue
-            note = " (not modified)" if fetched.not_modified else ""
-            print(f"{source.id:22} {count:3} chunks  {parsed.title}{note}")
+        return scrape_pages(conn, only, force)
     finally:
         conn.close()
+
+
+def store_calendar(conn, parsed: ksu_calendar.Calendar, source_url: str) -> int:
+    """Replace the stored calendar with the freshly parsed one; return the row count.
+
+    Only called after a successful parse, so a broken page never wipes the table.
+    """
+    scraped_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with conn:
+        conn.execute("DELETE FROM calendar_events WHERE source_url = ?", (source_url,))
+        conn.executemany(
+            "INSERT INTO calendar_events (academic_year, term, title, weekday, date_gregorian,"
+            " date_hijri, source_url, scraped_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    event.academic_year,
+                    event.term,
+                    event.title,
+                    event.weekday,
+                    event.date_gregorian,
+                    event.date_hijri,
+                    source_url,
+                    scraped_at,
+                )
+                for event in parsed.events
+            ],
+        )
+    return len(parsed.events)
+
+
+def scrape_calendar(conn, only: set[str] | None = None, force: bool = False) -> int:
+    """Scrape the academic calendar page, returning the number of failures."""
+    if only and CALENDAR.id not in only:
+        return 0
+    try:
+        fetched = fetch(CALENDAR.id, CALENDAR.url, force=force)
+        parsed = ksu_calendar.parse_calendar(fetched.html)
+    except (ScrapeError, ccis.ParseError) as exc:
+        logger.error("%s: %s (existing data kept)", CALENDAR.id, exc)
+        return 1
+    count = store_calendar(conn, parsed, CALENDAR.url)
+    mismatched = [event for event in parsed.events if not event.weekday_matches]
+    if mismatched:
+        logger.warning(
+            "%s: %d rows whose weekday does not match the Gregorian date: %s",
+            CALENDAR.id,
+            len(mismatched),
+            ", ".join(f"{event.title} {event.date_gregorian}" for event in mismatched),
+        )
+    note = " (not modified)" if fetched.not_modified else ""
+    print(f"{CALENDAR.id:22} {count:3} events  {parsed.academic_year}{note}")
+    return 0
+
+
+def run_calendar(force: bool = False) -> int:
+    """Refresh only the calendar table."""
+    conn = database.init_db(config.DB_PATH)
+    try:
+        return scrape_calendar(conn, None, force)
+    finally:
+        conn.close()
+
+
+def table_counts(conn) -> dict[str, int]:
+    """Row count per table, in a stable order."""
+    return {table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in TABLES}
+
+
+def run_all(only: set[str] | None = None, force: bool = False) -> int:
+    """Refresh college pages, faculty lists and the calendar (never profiles)."""
+    conn = database.init_db(config.DB_PATH)
+    try:
+        failures = scrape_pages(conn, only, force)
+        failures += scrape_lists(conn, only, force)[0]
+        failures += scrape_calendar(conn, only, force)
+        counts = table_counts(conn)
+    finally:
+        conn.close()
+    print("rows per table:")
+    for table, count in counts.items():
+        print(f"  {table:16} {count:6}")
     return failures
 
 
 def main() -> None:
     """Parse arguments, run the scrape and exit non-zero on any failure."""
-    parser = argparse.ArgumentParser(description="Scrape CCIS pages into SQLite.")
+    parser = argparse.ArgumentParser(description="Refresh the stored CCIS data.")
     parser.add_argument("--only", help="Comma-separated source ids to scrape")
     parser.add_argument("--force", action="store_true", help="Ignore ETag/Last-Modified")
     parser.add_argument("--faculty", action="store_true", help="Scrape faculty lists and profiles")
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="College pages, faculty lists and the calendar (not profiles), then row counts",
+    )
+    parser.add_argument("--calendar", action="store_true", help="Scrape only the academic calendar")
     parser.add_argument("--max-profiles", type=int, help="Fetch at most this many profiles")
     parser.add_argument(
         "--resume", action="store_true", help="Skip profiles already downloaded"
@@ -80,10 +184,21 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
     only = {part.strip() for part in args.only.split(",") if part.strip()} if args.only else None
-    known = FACULTY_LISTS_BY_ID if args.faculty else SOURCES_BY_ID
-    unknown = (only or set()) - set(known)
+    if args.all:
+        known = set(SOURCES_BY_ID) | set(FACULTY_LISTS_BY_ID) | {CALENDAR.id}
+    elif args.calendar:
+        known = {CALENDAR.id}
+    elif args.faculty:
+        known = set(FACULTY_LISTS_BY_ID)
+    else:
+        known = set(SOURCES_BY_ID)
+    unknown = (only or set()) - known
     if unknown:
         raise SystemExit(f"unknown source id(s): {', '.join(sorted(unknown))}")
+    if args.all:
+        raise SystemExit(1 if run_all(only, args.force) else 0)
+    if args.calendar:
+        raise SystemExit(1 if run_calendar(args.force) else 0)
     if args.faculty:
         raise SystemExit(1 if run_faculty(only, args.force, args.max_profiles, args.resume) else 0)
     raise SystemExit(1 if run(only, args.force) else 0)
@@ -196,7 +311,20 @@ def store_faculty(
 
 
 def store_office_hours(conn, faculty_id: int, hours, source_url: str, scraped_at: str) -> int:
-    """Replace a person's office hours with the freshly parsed ones."""
+    """Replace a person's office hours with the freshly parsed ones.
+
+    An empty parse keeps the stored rows: a page that opened without its hours table is
+    not evidence that the doctor published none, and the rule is that data is never wiped.
+    """
+    if not hours:
+        kept = conn.execute(
+            "SELECT COUNT(*) AS n FROM office_hours WHERE faculty_id = ?", (faculty_id,)
+        ).fetchone()["n"]
+        if kept:
+            logger.warning(
+                "no office hours parsed for faculty %s; keeping %d stored rows", faculty_id, kept
+            )
+        return kept
     with conn:
         conn.execute("DELETE FROM office_hours WHERE faculty_id = ?", (faculty_id,))
         conn.executemany(
@@ -215,6 +343,37 @@ def _profile_cached(username: str) -> bool:
     return (CACHE_DIR / f"fac_profile_{username}.html").exists()
 
 
+def scrape_lists(
+    conn,
+    only: set[str] | None = None,
+    force: bool = False,
+    skipped: list[str] | None = None,
+) -> tuple[int, list[str]]:
+    """Scrape the faculty list pages, returning failures and the usernames found."""
+    failures = 0
+    usernames: list[str] = []
+    for faculty_list in FACULTY_LISTS:
+        if only and faculty_list.id not in only:
+            continue
+        scraped_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        try:
+            fetched = fetch(faculty_list.id, faculty_list.url, force=force)
+            rows = faculty.parse_list(
+                fetched.html, faculty_list.department, faculty_list.url
+            )
+        except (ScrapeError, ccis.ParseError) as exc:
+            logger.error("%s: %s (existing data kept)", faculty_list.id, exc)
+            if skipped is not None:
+                skipped.append(f"{faculty_list.id}: {exc}")
+            failures += 1
+            continue
+        for row in rows:
+            store_faculty(conn, row.username, scraped_at, row=row)
+        print(f"{faculty_list.id:22} {len(rows):3} people  {faculty_list.department}")
+        usernames.extend(row.username for row in rows)
+    return failures, usernames
+
+
 def run_faculty(
     only: set[str] | None = None,
     force: bool = False,
@@ -225,27 +384,9 @@ def run_faculty(
     conn = database.init_db(config.DB_PATH)
     failures = 0
     skipped: list[str] = []
-    usernames: list[str] = []
     try:
-        for faculty_list in FACULTY_LISTS:
-            if only and faculty_list.id not in only:
-                continue
-            scraped_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            try:
-                fetched = fetch(faculty_list.id, faculty_list.url, force=force)
-                rows = faculty.parse_list(
-                    fetched.html, faculty_list.department, faculty_list.url
-                )
-            except (ScrapeError, ccis.ParseError) as exc:
-                logger.error("%s: %s (existing data kept)", faculty_list.id, exc)
-                skipped.append(f"{faculty_list.id}: {exc}")
-                failures += 1
-                continue
-            for row in rows:
-                store_faculty(conn, row.username, scraped_at, row=row)
-            print(f"{faculty_list.id:22} {len(rows):3} people  {faculty_list.department}")
-            usernames.extend(row.username for row in rows)
-
+        list_failures, usernames = scrape_lists(conn, only, force, skipped)
+        failures += list_failures
         usernames = list(dict.fromkeys(usernames))
         if resume:
             usernames = [name for name in usernames if not _profile_cached(name)]

@@ -1,6 +1,5 @@
 """Make the project root importable when pytest runs from anywhere."""
 
-import json
 import sys
 from pathlib import Path
 
@@ -20,20 +19,6 @@ FACULTY_ROWS = [
     ("dup1", "محمد عبدالله السالم", None, "CS", "31", "2200", "msalem@ksu.edu.sa"),
     ("dup2", "محمد سعد السالم", None, "CS", "31", "2201", "msalem2@ksu.edu.sa"),
 ]
-
-SAMPLE_SCHEDULES = {
-    "_note": "demo sample data",
-    "version": 1,
-    "doctors": {
-        "sampleonly": {
-            "busy": [{"day": "Sunday", "start": "09:00", "end": "11:00", "label": "demo"}]
-        },
-        "withhours": {
-            "busy": [{"day": "Sunday", "start": "08:00", "end": "16:00", "label": "demo"}]
-        },
-    },
-}
-
 
 @pytest.fixture()
 def faculty_db(tmp_path, monkeypatch):
@@ -83,9 +68,3 @@ def faculty_db(tmp_path, monkeypatch):
     return path
 
 
-@pytest.fixture()
-def sample_file(tmp_path):
-    """A temporary demo schedule file with two doctors."""
-    path = tmp_path / "sample_schedules.json"
-    path.write_text(json.dumps(SAMPLE_SCHEDULES), encoding="utf-8")
-    return path

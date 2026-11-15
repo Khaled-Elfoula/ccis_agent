@@ -1,16 +1,15 @@
 """Gemini function declarations and their SQLite-backed implementations."""
 
-import json
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from google.genai import types
 
 import config
 import db as database
-from agent.arabic import fts_query
+from agent.arabic import fts_query, search_form
 from agent.names import MAX_CANDIDATES, load_overrides, match_faculty, normalize_name
 
 MAX_LIMIT = 20
@@ -215,9 +214,6 @@ FIND_CONTACT_DECLARATION = types.FunctionDeclaration(
     ),
 )
 
-WORK_DAYS = ("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday")
-MIN_SLOT_MINUTES = 30
-SAMPLE_SCHEDULES_PATH = config.ROOT / "data" / "sample_schedules.json"
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 DAY_ALIASES = {
@@ -230,20 +226,8 @@ DAY_ALIASES = {
     "saturday": "Saturday", "sat": "Saturday", "السبت": "Saturday",
 }
 
-
-def _minutes(value: str) -> int | None:
-    """Parse "HH:MM" into minutes since midnight; None when it is not a time."""
-    try:
-        hour, minute = str(value).strip().split(":")[:2]
-        return int(hour) * 60 + int(minute)
-    except (TypeError, ValueError):
-        return None
-
-
-def _clock(minutes: int) -> str:
-    """Format minutes since midnight as "HH:MM"."""
-    return f"{minutes // 60:02d}:{minutes % 60:02d}"
-
+CALENDAR_LIMIT = 40
+TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 def normalize_day(value: str | None) -> str | None:
     """Map an English or Arabic day name to its canonical English name."""
@@ -252,54 +236,8 @@ def normalize_day(value: str | None) -> str | None:
     return DAY_ALIASES.get(str(value).strip().lower())
 
 
-def free_slots_for_day(
-    day: str,
-    busy: list[dict] | None,
-    start: str | None = None,
-    end: str | None = None,
-    minimum: int = MIN_SLOT_MINUTES,
-) -> list[dict]:
-    """Return the free gaps of at least `minimum` minutes in one working window."""
-    window_start = _minutes(start or config.WORK_DAY_START)
-    window_end = _minutes(end or config.WORK_DAY_END)
-    if window_start is None or window_end is None or window_end <= window_start:
-        return []
-
-    blocks: list[tuple[int, int]] = []
-    for block in busy or []:
-        if normalize_day(block.get("day")) != day:
-            continue
-        block_start = _minutes(block.get("start"))
-        block_end = _minutes(block.get("end"))
-        if block_start is None or block_end is None or block_end <= block_start:
-            continue
-        blocks.append((max(block_start, window_start), min(block_end, window_end)))
-
-    slots: list[dict] = []
-    cursor = window_start
-    for block_start, block_end in sorted(blocks):
-        if block_end <= cursor:
-            continue
-        if block_start - cursor >= minimum:
-            slots.append({"day": day, "start": _clock(cursor), "end": _clock(block_start)})
-        cursor = max(cursor, block_end)
-    if window_end - cursor >= minimum:
-        slots.append({"day": day, "start": _clock(cursor), "end": _clock(window_end)})
-    return slots
-
-
-def load_sample_schedules(path: str | Path | None = None) -> dict:
-    """Read the demo busy blocks, returning {} when the file is missing or broken."""
-    try:
-        data = json.loads(Path(path or SAMPLE_SCHEDULES_PATH).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    doctors = data.get("doctors") if isinstance(data, dict) else None
-    return doctors if isinstance(doctors, dict) else {}
-
-
 def _office_hours(faculty_id: int, db_path=None) -> list[dict]:
-    """Return a person's stored office-hours rows, newest first, or []."""
+    """Return a person's stored office-hours rows in page order, or []."""
     try:
         conn = database.connect(db_path or config.DB_PATH)
         try:
@@ -315,22 +253,21 @@ def _office_hours(faculty_id: int, db_path=None) -> list[dict]:
     return [dict(row) for row in rows]
 
 
-def _file_date(path: str | Path | None = None) -> str | None:
-    """Return the last-modified date of the sample file as an ISO date."""
-    try:
-        stamp = Path(path or SAMPLE_SCHEDULES_PATH).stat().st_mtime
-    except OSError:
-        return None
-    return datetime.fromtimestamp(stamp, timezone.utc).date().isoformat()
+def _readable_hour(row: dict) -> bool:
+    """True for a stored row with a real HH:MM range that ends after it starts."""
+    start = TIME_RE.match(str(row.get("start") or ""))
+    end = TIME_RE.match(str(row.get("end") or ""))
+    if start is None or end is None:
+        return False
+    return (end.group(1), end.group(2)) > (start.group(1), start.group(2))
 
 
-def get_free_slots(
+def get_office_hours(
     faculty_name: str,
     day: str | None = None,
     db_path: str | Path | None = None,
-    sample_path: str | Path | None = None,
 ) -> dict:
-    """Return a person's published office hours, or gaps from the demo sample data."""
+    """Return a person's published office hours, or their contact details when they have none."""
     record, candidates, error = _lookup(faculty_name, db_path)
     if error is not None:
         return error
@@ -344,47 +281,51 @@ def get_free_slots(
             return {"error": f"unknown day: {day}"}
 
     person = _contact(record)
-    hours = _office_hours(record["id"], db_path)
-    if hours:
+    rows = _office_hours(record["id"], db_path)
+    if not rows:
         return {
+            "no_office_hours": True,
             "faculty": person,
-            "basis": "office_hours",
-            "slots": [
-                {"day": row["day"], "start": row["start"], "end": row["end"]}
-                for row in hours
-                if wanted is None or normalize_day(row["day"]) == wanted
-            ],
-            "source_url": hours[0]["source_url"],
-            "scraped_at": hours[0]["scraped_at"],
+            "email": person.get("email"),
+            "email_source": person.get("email_source"),
+            "office": {"building": person.get("building"), "room": person.get("room")},
+            "profile_url": person.get("profile_url"),
         }
 
-    sample = load_sample_schedules(sample_path).get(record["username"])
-    if not sample:
-        return {"error": "no schedule data"}
-    slots: list[dict] = []
-    for name in [wanted] if wanted else WORK_DAYS:
-        slots.extend(free_slots_for_day(name, sample.get("busy")))
-    return {
+    readable = [row for row in rows if _readable_hour(row)]
+    selected = [
+        row for row in readable if wanted is None or normalize_day(row["day"]) == wanted
+    ]
+    result = {
         "faculty": person,
-        "basis": "sample_data",
-        "slots": slots,
-        "source_url": "data/sample_schedules.json",
-        "scraped_at": _file_date(sample_path),
+        "office_hours": [
+            {"day": row["day"], "start": row["start"], "end": row["end"]} for row in selected
+        ],
+        "source_url": rows[0]["source_url"],
+        "scraped_at": rows[0]["scraped_at"],
     }
+    if wanted is not None:
+        result["day"] = wanted
+    if len(readable) < len(rows):
+        result["unreadable_rows"] = len(rows) - len(readable)
+    return result
 
 
-GET_FREE_SLOTS_DECLARATION = types.FunctionDeclaration(
-    name="get_free_slots",
+GET_OFFICE_HOURS_DECLARATION = types.FunctionDeclaration(
+    name="get_office_hours",
     description=(
-        "Return when a faculty member is free: their published office hours, or, when they have none, "
-        "gaps estimated from a demo sample schedule. Read-only: it never books, reserves or sends anything. "
-        "The result carries a basis field: 'office_hours' means these are the doctor's published office hours; "
-        "'sample_data' means the times come from DEMO sample data and are not confirmed availability, so say "
-        "that clearly and suggest confirming by email. "
-        "Returns {faculty, basis, slots: [{day, start, end}], source_url, scraped_at}. "
+        "Return a faculty member's published office hours, read from their profile page. "
+        "Read-only: it never books, reserves or sends anything, and it does not estimate or compute "
+        "free times. "
+        "Returns {faculty, office_hours: [{day, start, end}], source_url, scraped_at}, plus the "
+        "requested day when one was given. If office_hours is empty the doctor published no hours for "
+        "that day; unreadable_rows counts published rows whose times could not be read. "
+        "When the doctor has no published office hours at all it returns {no_office_hours: true, "
+        "faculty, email, email_source, office, profile_url} instead, so you can give their email and "
+        "office and suggest writing to them. "
         "When the name is not confirmed it returns {status: 'candidates, not confirmed', message, "
-        "candidates: [...]}: ask the user 'did you mean X?' and never present a candidate as the answer. "
-        "Returns {\"error\": \"no schedule data\"} when the person has neither office hours nor sample data."
+        "candidates: [...]}: ask the user 'did you mean X?' and never present a candidate as the "
+        "answer. Returns {\"error\": ...} when nobody matches."
     ),
     parameters=types.Schema(
         type=types.Type.OBJECT,
@@ -399,6 +340,117 @@ GET_FREE_SLOTS_DECLARATION = types.FunctionDeclaration(
             ),
         },
         required=["faculty_name"],
+    ),
+)
+
+
+def _calendar_rows(db_path=None) -> tuple[list[dict], dict | None]:
+    """Read every stored calendar row, or return the error to give the model."""
+    try:
+        conn = database.connect(db_path or config.DB_PATH)
+        try:
+            rows = conn.execute(
+                "SELECT title, term, academic_year, weekday, date_gregorian, date_hijri,"
+                " source_url, scraped_at FROM calendar_events ORDER BY date_gregorian, id"
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return [], {"error": f"calendar unavailable: {exc}"}
+    if not rows:
+        return [], {"error": "calendar is empty"}
+    return [dict(row) for row in rows], None
+
+
+def _token_matches(wanted: str, tokens: list[str]) -> bool:
+    """True when a query token is a title token, or a longer form of one."""
+    return any(
+        wanted == token
+        or (len(wanted) >= 3 and (token.startswith(wanted) or wanted.startswith(token)))
+        for token in tokens
+    )
+
+
+def _title_matches(topic: str, title: str) -> bool:
+    """True when every word of the topic appears in the event title."""
+    wanted = [token for token in search_form(topic).split() if len(token) > 1]
+    have = search_form(title).split()
+    return bool(wanted) and all(_token_matches(token, have) for token in wanted)
+
+
+def _term_matches(term: str, stored: str | None) -> bool:
+    """True when the asked term is the stored term, allowing a shorter form."""
+    wanted, have = search_form(term), search_form(stored or "")
+    return bool(wanted) and bool(have) and (wanted in have or have in wanted)
+
+
+def _flag(value) -> bool:
+    """Read a model boolean that may arrive as a string."""
+    return value is True or str(value).strip().lower() in ("true", "1", "yes")
+
+
+def get_calendar(
+    topic: str | None = None,
+    term: str | None = None,
+    upcoming_only: bool = False,
+    db_path: str | Path | None = None,
+    today: date | None = None,
+) -> list[dict] | dict:
+    """Return calendar events matching a topic and term, with their dates and sources."""
+    rows, error = _calendar_rows(db_path)
+    if error is not None:
+        return error
+
+    now = (today or date.today()).isoformat()
+    selected: list[dict] = []
+    for row in rows:
+        if topic and str(topic).strip() and not _title_matches(topic, row["title"]):
+            continue
+        if term and str(term).strip() and not _term_matches(term, row["term"]):
+            continue
+        row["is_past"] = row["date_gregorian"] < now
+        if _flag(upcoming_only) and row["is_past"]:
+            continue
+        selected.append(row)
+    if not selected:
+        return {"error": "no matching calendar events"}
+    return selected[:CALENDAR_LIMIT]
+
+
+GET_CALENDAR_DECLARATION = types.FunctionDeclaration(
+    name="get_calendar",
+    description=(
+        "Look up key dates and deadlines on the university's academic calendar: the start and end of "
+        "study, the national day and mid-year breaks, the academic reinforcement week, and the final "
+        "exam periods, for the first and second semesters and the summer term. "
+        "Use it for every date or deadline question; never answer one from memory. "
+        "Returns one row per date: {title, term, academic_year, weekday, date_gregorian, date_hijri, "
+        "source_url, scraped_at, is_past}. Each 'بداية ...' and 'نهاية ...' is its own row, and no date "
+        "range is computed. Set upcoming_only=true to leave out dates that have already passed. "
+        "Returns {\"error\": \"no matching calendar events\"} when the page has no such row: say the event "
+        "is not on the university calendar page and do not guess a date. "
+        "Returns {\"error\": \"calendar is empty\"} when the calendar has not been downloaded yet."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "topic": types.Schema(
+                type=types.Type.STRING,
+                description=(
+                    "What to look for, e.g. بداية الدراسة, الاختبارات النهائية, إجازة, الأسبوع "
+                    "التعزيزي. Arabic or English; omit for every row."
+                ),
+            ),
+            "term": types.Schema(
+                type=types.Type.STRING,
+                description="Optional term, e.g. الفصل الدراسي الأول or الفصل الصيفي. Omit for all terms.",
+            ),
+            "upcoming_only": types.Schema(
+                type=types.Type.BOOLEAN,
+                description="When true, leave out dates before today.",
+            ),
+        },
+        required=[],
     ),
 )
 
@@ -623,8 +675,9 @@ TOOLS = [
     types.Tool(
         function_declarations=[
             SEARCH_KB_DECLARATION,
+            GET_CALENDAR_DECLARATION,
             FIND_CONTACT_DECLARATION,
-            GET_FREE_SLOTS_DECLARATION,
+            GET_OFFICE_HOURS_DECLARATION,
             DRAFT_EMAIL_DECLARATION,
             HANDOFF_DECLARATION,
         ]
@@ -632,11 +685,47 @@ TOOLS = [
 ]
 HANDLERS = {
     "search_kb": search_kb,
+    "get_calendar": get_calendar,
     "find_contact": find_contact,
-    "get_free_slots": get_free_slots,
+    "get_office_hours": get_office_hours,
     "draft_email": draft_email,
     "handoff": handoff,
 }
+
+
+
+def _instant(value) -> datetime | None:
+    """Read a stored ISO timestamp as an aware datetime, or None when unreadable."""
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _stale(value) -> bool:
+    """True when a stored scraped_at is older than STALE_AFTER_DAYS."""
+    instant = _instant(value)
+    if instant is None:
+        return False
+    age = (datetime.now(timezone.utc) - instant).total_seconds() / 86400
+    return age >= config.STALE_AFTER_DAYS
+
+
+def _with_staleness(value):
+    """Flag every result that carries an old scraped_at, without changing its shape."""
+    if isinstance(value, list):
+        return [_with_staleness(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    record = {key: _with_staleness(item) for key, item in value.items()}
+    stamp = record.get("scraped_at")
+    if stamp and _stale(stamp):
+        record["stale"] = True
+        record["stale_note"] = (
+            f"last updated {str(stamp)[:10]}, more than {config.STALE_AFTER_DAYS} days ago"
+        )
+    return record
 
 
 def execute_tool(name: str, arguments: dict | None) -> list | dict:
@@ -645,8 +734,9 @@ def execute_tool(name: str, arguments: dict | None) -> list | dict:
     if handler is None:
         return {"error": f"unknown tool: {name}"}
     try:
-        return handler(**(arguments or {}))
+        result = handler(**(arguments or {}))
     except TypeError as exc:
         return {"error": f"bad arguments for {name}: {exc}"}
     except Exception as exc:  # a failing tool must never break the agent loop
         return {"error": f"{name} failed: {exc}"}
+    return _with_staleness(result)

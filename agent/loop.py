@@ -55,16 +55,19 @@ class Agent:
             config.HISTORY_MESSAGES if history_messages is None else history_messages
         )
         self._history: dict[int, list[types.Content]] = {}
-
+        self.last_tools: dict[int, list[str]] = {}
     def reset(self, chat_id: int) -> None:
         """Forget the conversation with one chat."""
         self._history.pop(chat_id, None)
+        self.last_tools.pop(chat_id, None)
 
     def reply(self, chat_id: int, text: str) -> str:
         """Answer one user message, running tool calls until the model stops."""
         history = self._history.setdefault(chat_id, [])
         turn = [*history, types.Content(role="user", parts=[types.Part(text=text)])]
-        answer = self._run(turn, detect_language(text))
+        tools: list[str] = []
+        answer = self._run(turn, detect_language(text), tools)
+        self.last_tools[chat_id] = tools
         history.extend(
             [
                 types.Content(role="user", parts=[types.Part(text=text)]),
@@ -74,7 +77,9 @@ class Agent:
         del history[: max(0, len(history) - self.history_messages)]
         return answer
 
-    def _run(self, contents: list[types.Content], language: str = "en") -> str:
+    def _run(
+        self, contents: list[types.Content], language: str = "en", tools: list[str] | None = None
+    ) -> str:
         """Drive the tool-call loop for one turn, within the call budget."""
         seen: set[str] = set()
         calls = 0
@@ -104,6 +109,8 @@ class Agent:
                     seen.add(key)
                     calls += 1
                     executed += 1
+                    if tools is not None:
+                        tools.append(call.name)
                     result = execute_tool(call.name, arguments)
                 contents.append(
                     types.Content(
