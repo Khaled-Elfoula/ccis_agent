@@ -20,11 +20,11 @@ name. A name that only partly matches comes back as **candidates, not confirmed*
 ## The messages and what to expect
 
 1. **"What programs does the college offer?"**
-   `search_kb` returns passages from `ccis.ksu.edu.sa/ar/bsc`, `/masters`, `/phd`. The answer lists the
-   programs and cites the source link.
+   `list_programs` returns every bachelor, master and PhD programme from `ccis.ksu.edu.sa/ar/bsc`,
+   `/masters` and `/phd`. The answer lists all of them and cites the source link.
 
 2. **"ما هي برامج البكالوريوس في الكلية؟"**
-   Same lookup, answered in Arabic with the source link.
+   Same tool, filtered to bachelor, answered in Arabic with the source link.
 
 3. **"How do I transfer to the college?"**
    `search_kb` on `acceptance-and-transfer`. The answer gives the transfer conditions from that page,
@@ -38,8 +38,8 @@ name. A name that only partly matches comes back as **candidates, not confirmed*
    The same person. Name matching tolerates the missing "u" and returns the same contact details.
 
 6. **"When is Dr. Saad AlAhmadi free on Sunday?"**
-   `get_office_hours` returns Sunday 16:00–18:00 with the profile link and the date it was read. The answer
-   says these are his **published office hours** and that nothing was booked.
+   `get_office_hours` returns Sunday 16:00–18:00 with the profile link. The answer says these are his
+   **published office hours** and that nothing was booked.
 
 7. **"What about Dr. Duaa AlSaeed on Tuesday?"**
    `get_office_hours` returns Tuesday 12:00–14:00, again as published hours, with her profile link.
@@ -86,10 +86,10 @@ py scripts/demo_check.py                   # run the twelve messages through the
 py main.py                                 # start the Telegram bot
 ```
 
-`--all` refreshes the college pages, the five faculty lists, the calendar, the academic-movements table and
-the course catalog, then prints the row count of each table. It does **not** fetch profiles; use `--faculty`
-for those. Faculty profile scraping is paused: the host was throttling profile requests, so the stored 314
-rows stay as they are.
+`--all` refreshes the college pages (including the three degree-program pages), the five faculty lists, the
+calendar, the academic-movements table and the course catalog, then prints the row count of each table. It
+does **not** fetch profiles; use `--faculty` for those. Faculty profile scraping is paused: the host was
+throttling profile requests, so the stored 314 rows stay as they are.
 
 The database is refreshed by hand and then committed. The bot never scrapes on a schedule and never while a
 user waits.

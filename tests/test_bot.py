@@ -1,6 +1,6 @@
 """Tests for the Telegram adapter helpers."""
 
-from bot.telegram import ChatLimiter, split_message
+from bot.telegram import ChatLimiter, split_message, turn_intent
 
 
 def test_short_message_is_sent_as_one_piece():
@@ -38,3 +38,8 @@ def test_limiter_window_expires(monkeypatch):
     assert not limiter.allow(1)
     clock["now"] += 11
     assert limiter.allow(1)
+
+
+def test_turn_intent_labels_program_and_course_tools():
+    assert turn_intent(["list_programs"]) == "programs"
+    assert turn_intent(["find_course", "list_courses"]) == "courses"

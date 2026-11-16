@@ -163,7 +163,7 @@ def test_no_fallback_call_when_both_models_are_the_same(monkeypatch):
 
 
 def test_english_message_asks_for_an_english_reply():
-    agent, client = make_agent([text_response("The college offers four programs.")])
+    agent, client = make_agent([text_response("The college offers several programs.")])
     agent.reply(1, "What programs does the college offer?")
     instruction = client.requests[0]["config"].system_instruction
     assert "written in English" in instruction
@@ -171,7 +171,7 @@ def test_english_message_asks_for_an_english_reply():
 
 
 def test_arabic_message_asks_for_an_arabic_reply():
-    agent, client = make_agent([text_response("تقدم الكلية أربعة برامج.")])
+    agent, client = make_agent([text_response("تقدم الكلية عدة برامج.")])
     agent.reply(1, "ما هي برامج الكلية؟")
     instruction = client.requests[0]["config"].system_instruction
     assert "written in Arabic" in instruction

@@ -290,6 +290,19 @@ def test_programs_parse_tracks_the_department():
     assert all(row.requirements_ar is None for row in rows)
 
 
+def test_programs_parse_reads_a_plain_department_heading():
+    html = """
+    <div class="node__content">
+      <h2>قسم علوم الحاسب</h2>
+      <p>بكالوريوس العلوم في علوم الحاسب</p>
+    </div>
+    """
+    rows = programs.parse(html, "بكالوريوس", "https://ccis.ksu.edu.sa/ar/bsc")
+    assert [(row.department, row.name_ar) for row in rows] == [
+        ("CS", "بكالوريوس العلوم في علوم الحاسب")
+    ]
+
+
 def test_programs_parse_attaches_admission_requirements():
     html = """
     <div class="node__content">

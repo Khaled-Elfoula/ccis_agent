@@ -122,7 +122,7 @@ def parse(html: str, degree: str, source_url: str) -> list[Program]:
             flush_requirements()
             collecting = True
             continue
-        if _is_department_heading(text) and tag.find("a") is not None:
+        if _is_department_heading(text):
             flush_requirements()
             department = _department(text)
             current = []

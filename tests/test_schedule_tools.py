@@ -116,6 +116,7 @@ def test_office_hours_never_books_anything(faculty_db):
         "get_office_hours",
         "find_course",
         "list_courses",
+        "list_programs",
         "draft_email",
         "handoff",
     }

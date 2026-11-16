@@ -6,7 +6,7 @@ university academic calendar, looks up a faculty member's contact details and pu
 hands off complex cases with a contact and an email template in Arabic or English.
 
 It is read-only: it never books, reserves, confirms or sends anything, and every fact it gives comes from a
-stored page with a source link.
+stored page with a source or profile link.
 
 ## Setup
 
@@ -81,12 +81,12 @@ fixtures. The calendar, academic-movements and course-catalog parsers are tested
 | Path | What it holds |
 |---|---|
 | `agent/loop.py` | The tool-calling loop, stop rules, retries and the fallback model |
-| `agent/tools.py` | `search_kb`, `get_calendar`, `find_contact`, `get_office_hours`, `find_course`, `list_courses`, `draft_email`, `handoff` |
+| `agent/tools.py` | `search_kb`, `list_programs`, `get_calendar`, `find_contact`, `get_office_hours`, `find_course`, `list_courses`, `draft_email`, `handoff` |
 | `agent/prompts.py` | Loads the system prompt from the marked block in `agent.md` |
 | `agent/names.py`, `agent/arabic.py` | Arabic normalization and faculty name matching |
 | `bot/telegram.py` | Telegram adapter, rate limit, reply splitting, turn logging |
 | `scrapers/` | One module per source plus the refresh command |
-| `db/schema.sql` | `pages`, `chunks`, `faculty`, `office_hours`, `calendar_events`, `academic_deadlines`, `courses` |
+| `db/schema.sql` | `pages`, `chunks`, `faculty`, `office_hours`, `calendar_events`, `academic_deadlines`, `courses`, `programs` |
 | `scripts/` | Data reports, email filling and `prepare_deploy.py` |
 | `spec.md`, `agent.md` | The specification and the runtime system prompt |
 

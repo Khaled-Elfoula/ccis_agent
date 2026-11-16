@@ -35,6 +35,23 @@ PAGES = [
     ),
 ]
 
+PROGRAMS = [
+    (
+        "ماجستير",
+        "CS",
+        "درجة الماجستير في علوم الحاسب خيار الرسالة",
+        "https://ccis.ksu.edu.sa/ar/masters",
+        "شروط القبول: تقدير لا يقل عن جيد جدا.",
+    ),
+    (
+        "ماجستير",
+        "SE",
+        "درجة الماجستير في هندسة البرمجيات خيار الرسالة",
+        "https://ccis.ksu.edu.sa/ar/masters",
+        "شروط القبول: تقدير لا يقل عن جيد جدا.",
+    ),
+]
+
 
 @pytest.fixture()
 def kb(tmp_path):
@@ -50,6 +67,14 @@ def kb(tmp_path):
             "INSERT INTO chunks (page_id, text, text_norm) VALUES (?, ?, ?)",
             [(page_id, chunk, search_form(chunk)) for chunk in chunks],
         )
+    conn.executemany(
+        "INSERT INTO programs (degree, department, name_ar, requirements_ar, source_url, scraped_at)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (degree, department, name, requirements, url, "2026-11-10T10:00:00+00:00")
+            for degree, department, name, url, requirements in PROGRAMS
+        ],
+    )
     conn.commit()
     conn.close()
     return path
@@ -109,21 +134,44 @@ def tool_results(client: FakeClient) -> list:
 
 
 def test_case1_english_question_gets_an_answer_with_a_source_link(kb):
-    """§14.1: the answer can cite a source_url that came from the knowledge base."""
+    """§14.1: the answer can cite a source_url that came from a tool result."""
     agent, client = make_agent(
         [
-            tool_response("search_kb", {"query": "admission requirements", "db_path": str(kb)}),
+            tool_response(
+                "list_programs",
+                {"include_requirements": True, "db_path": str(kb)},
+            ),
             text_response(
                 "Master's admission needs a grade of very good or better. "
-                "Source: https://ccis.ksu.edu.sa/en/masters"
+                "Source: https://ccis.ksu.edu.sa/ar/masters"
             ),
         ]
     )
     answer = agent.reply(1, "What are the admission requirements for the master program?")
-    assert "https://ccis.ksu.edu.sa/en/masters" in answer
-    passages = tool_results(client)[0]
-    assert passages[0]["source_url"] == "https://ccis.ksu.edu.sa/en/masters"
-    assert passages[0]["scraped_at"] == "2026-11-10T10:00:00+00:00"
+    assert "https://ccis.ksu.edu.sa/ar/masters" in answer
+    programs = tool_results(client)[0]
+    assert programs[0]["source_url"] == "https://ccis.ksu.edu.sa/ar/masters"
+    assert programs[0]["scraped_at"] == "2026-11-10T10:00:00+00:00"
+    assert programs[0]["requirements"].startswith("شروط القبول")
+
+
+def test_case1b_program_question_uses_list_programs(kb):
+    """§14.15: a program question returns every program, not one passage."""
+    agent, client = make_agent(
+        [
+            tool_response("list_programs", {"db_path": str(kb)}),
+            text_response(
+                "The college offers the master's programmes in CS and SE. "
+                "Source: https://ccis.ksu.edu.sa/ar/masters"
+            ),
+        ]
+    )
+    answer = agent.reply(1, "What programs does the college offer?")
+    assert "master" in answer.lower()
+    programs = tool_results(client)[0]
+    assert len(programs) == len(PROGRAMS)
+    assert {row["name"] for row in programs} == {name for _, _, name, _, _ in PROGRAMS}
+    assert all(row["source_url"].endswith("/masters") for row in programs)
 
 
 def test_case2_arabic_question_gets_an_arabic_answer(kb):
@@ -147,7 +195,7 @@ def test_case2_arabic_question_gets_an_arabic_answer(kb):
 
 
 def test_case3_office_hours_are_labelled_and_nothing_is_booked(faculty_db):
-    """§14.3: published office hours are returned with a source, and nothing is booked."""
+    """§14.3: published office hours are returned with a profile link, and nothing is booked."""
     agent, client = make_agent(
         [
             tool_response(

@@ -201,16 +201,17 @@ The calendar keeps **one row per date**: `بداية ...` and `نهاية ...` a
 
 ## 8. Tools
 
-All tools return JSON. `search_kb`, `get_calendar` and `find_course` include `source_url` and `scraped_at`; `find_contact` and `get_office_hours` return contact details without that metadata. Errors return `{"error": "..."}` and never raise into the loop. A result whose `scraped_at` is older than `STALE_AFTER_DAYS` also carries `stale: true` and a `stale_note` with its date, so the agent can say the information may have changed.
+All tools return JSON. `search_kb`, `get_calendar`, `find_course` and `list_programs` include `source_url` and `scraped_at`; `find_contact` and `get_office_hours` return contact details without that metadata. Errors return `{"error": "..."}` and never raise into the loop. A result whose `scraped_at` is older than `STALE_AFTER_DAYS` also carries `stale: true` and a `stale_note` with its date, so the agent can say the information may have changed.
 
 | Tool | Input | Output |
 |---|---|---|
 | `search_kb` | `query: str`, `lang?: "ar"\|"en"`, `limit?: int=5` | `[{text, title, source_url, scraped_at}]` ranked by FTS5 |
+| `list_programs` | `level?: "bachelor"\|"master"\|"phd"`, `department?: "CS"\|"CE"\|"IT"\|"SE"\|"IS"\|"shared"`, `include_requirements?: bool=false` | `[{degree, department, name, source_url, scraped_at, requirements?}]`, every matching programme |
 | `get_calendar` | `topic?: str`, `term?: str`, `upcoming_only?: bool` | `[{title, term, academic_year, kind, start_date, end_date, weekdays, date_hijri, note, status, days_left_until_end?, days_until_start?, source_url, scraped_at}]`, from `calendar_events` and `academic_deadlines` together |
-| `find_course` | `query: str`, `level?: "bachelor"\|"graduate"` | one exact code: `{code, code_display, name, level, hours{credit, lecture, lab, tutorial, text}, prerequisites{text, codes, min_credit_hours}, corequisites{text, codes}, description, unlocks[], source_url, scraped_at}`; several matches: `[{code, name, credit_hours, description}]` (max 5) |
+| `find_course` | `query: str`, `level?: "bachelor"\|"graduate"` | one exact code: `{code, code_display, name, level, hours{credit, lecture, lab, tutorial, text}, prerequisites{text, codes, min_credit_hours}, corequisites{text, codes}, description, unlocks[], source_url, scraped_at}`; several matches: `[{code, name, credit_hours, description, source_url, scraped_at}]` (max 5) |
 | `list_courses` | `level?: "bachelor"\|"graduate"` | `[{code, name, credit_hours, level}]` |
 | `find_contact` | `person_or_role: str` | `[{name, rank, department, building, room, email, profile_url}]` |
-| `get_office_hours` | `faculty_name: str`, `day?: str` | `{faculty, office_hours: [{day, start, end}]}`; or `{no_office_hours: true, faculty, email, office, profile_url}`; or `{status: "candidates, not confirmed", ...}` when the name is ambiguous |
+| `get_office_hours` | `faculty_name: str`, `day?: str` | `{faculty: {name, rank, department, building, room, email, profile_url}, office_hours: [{day, start, end}]}`; or `{no_office_hours: true, faculty, email, office, profile_url}`; or `{status: "candidates, not confirmed", ...}` when the name is ambiguous |
 | `draft_email` | `to: str`, `case_summary: str`, `lang: "ar"\|"en"` | `{subject, body}` with `[Your name]`, `[Your ID]` placeholders |
 | `handoff` | `reason: str`, `contact: str`, `lang: "ar"\|"en"` | `{message}` containing reason, contact and template |
 
@@ -226,6 +227,8 @@ All tools return JSON. `search_kb`, `get_calendar` and `find_course` include `so
 **Calendar and academic deadlines.** `get_calendar` is one tool over two tables: `calendar_events` (single dates) and `academic_deadlines` (start and end windows). It returns one shape for both and filters by topic and term with the same Arabic normalization as search (so `الحذف` matches `حذف`, and `الفصل الأول` matches the full term name). `TOPIC_SYNONYMS` in `agent/tools.py` maps what students say to the rows they mean: a course withdrawal (`اعتذار`, `انسحاب من مقرر`, `حذف مقرر`) reaches `الاعتذار عن مقرر دراسي` and `الحذف والإضافة`; `انسحاب من الجامعة` reaches `الانسحاب من الجامعة`; and a bare "withdraw" reaches both, because they are different movements. `status` (`past` | `open_now` | `upcoming`), `days_left_until_end` and `days_until_start` are computed in code; the model never does date arithmetic. A row with no date (the make-up exam request) has `status: null` and its text in `note`. If nothing matches, the tool returns an error and the agent says the date is not on the university calendar. Results are capped at 8, open rows first.
 
 **Courses.** `find_course` reads a code written in any order or script (`هاب312`, `312 هاب`, `هاب ٣١٢`, `hab 312`) or words from a name or description, and `list_courses` lists the catalog by level. One exact code returns the full record, with `unlocks` (the courses that list this code as a prerequisite) computed at query time. A null `name` means the catalog lists none: the agent says so and gives the description rather than inventing a name.
+
+**Programmes.** `list_programs` reads the `programs` table, one row per programme from the bachelor, master and PhD pages. It returns every matching programme with its degree, department, name and source, and filters by `level` (`bachelor`, `master`, `phd`) and `department` (`CS`, `CE`, `IT`, `SE`, `IS`, `shared`). Admission conditions are returned only when `include_requirements` is true. A question about what the college offers, or about one department's or level's programmes, must use this tool rather than `search_kb`; the agent lists every row the tool returns, never just one.
 
 **Email provenance (internal only).** `faculty.email_source` records where each address came from: `scraped` (read off the profile page), `derived` (built as `username@ksu.edu.sa` from the username, not confirmed on the page), `derived_unverified` (the same, but the profile page returned 403/404). The column serves the refresh logic only: a scraped email always wins over a stored derived one, and a profile fetch that finds no email keeps the stored address and its label. No tool returns the label, no prompt mentions it and no answer says where an email came from; the tools return the email alone.
 
@@ -265,7 +268,7 @@ loop:
 - Respect `robots.txt`; use a clear User-Agent with a contact email.
 - About 1 request per second per host; cache raw HTML on disk and use `If-Modified-Since` / ETag where possible.
 - Parse defensively. If a selector fails, log which source and selector, keep the old data, and do not wipe the table. A calendar or page parse failure leaves the stored rows untouched, and an empty office-hours parse keeps the stored rows.
-- Store `scraped_at` on everything.
+- Store `scraped_at` on every scraped row, even when a tool returns contact details without it.
 
 **Source registry**
 
@@ -327,6 +330,7 @@ Never commit `.env`. The database is committed on purpose after a refresh.
 | M5 | Calendar + contacts | `get_calendar` and `find_contact` work with sources |
 | M5.1 | Deadlines + course catalog | `get_calendar` also answers academic movements from `academic_deadlines` with a code-computed status; `find_course` and `list_courses` answer from `courses`; both pages are saved as fixtures and parsed in tests |
 | M6 | Faculty identity + office hours | Faculty list + profile scrapers fill `faculty` and `office_hours`; names match with `rapidfuzz`; `get_office_hours` returns the published rows or says there are none |
+| M6.1 | Degree programmes | The three program pages fill `programs`; `list_programs` returns every bachelor, master and PhD programme by level and department, with admission conditions on request |
 | M7 | Hand-off + templates | Petition-type request returns reason, contact and ar/en template |
 | M8 | Hardening + deploy | Failures keep old data; stale results are flagged; rate limit works; `scrapers.run --all` refreshes and prints counts; `scripts/prepare_deploy.py` prepares the database |
 | M9 | Eval pass | All acceptance tests below pass |
@@ -337,7 +341,7 @@ Each slice is committed separately and tested before the next one starts.
 
 1. An in-scope English question gets a correct answer with a source link.
 2. An Arabic question gets an Arabic answer.
-3. "When is Dr. X free on Sunday?" returns the doctor's published office hours with their source, or says no hours are published, and states nothing was booked.
+3. "When is Dr. X free on Sunday?" returns the doctor's published office hours with their profile link, or says no hours are published, and states nothing was booked.
 4. "Book me an appointment" is not booked; the agent offers the published hours or the advisor's email.
 5. "I want to withdraw after the deadline" produces a hand-off with contact and a template in the requested language.
 6. A question with no source returns "I couldn't find this" plus a contact; no invented facts.
@@ -349,6 +353,7 @@ Each slice is committed separately and tested before the next one starts.
 12. A date question is answered from `calendar_events` or `academic_deadlines` with a link, or the agent says it is not on the university calendar page.
 13. "Can I still drop a course?" gives the status first ("open now until Saturday 28 November 2026") from the tool, and a bare "withdraw" is answered as two different things: a course withdrawal and a withdrawal from the university.
 14. "What are the hours of هاب٤٤٤?" answers 2 credit hours, 0 lecture, 4 lab and 1 tutorial, with no date arithmetic and no invented name for هاب٣١٤.
+15. "What programs does the college offer?" returns every programme in `programs`, grouped by degree and department, not just one.
 
 ## 15. Risks and open questions
 
@@ -357,7 +362,7 @@ Each slice is committed separately and tested before the next one starts.
 | The calendar page changes layout or moves | Parser raises on a missing table and the stored rows are kept; saved copy in `tests/fixtures/calendar/` |
 | The calendar has no drop/add or withdrawal rows | Those movements come from `academic_deadlines`; a topic that matches neither table returns an error and the agent says so instead of guessing |
 | The catalog page changes layout | The parser finds labels by text, reports anomalies instead of fixing them, and raises on a page with no course; saved copy in `tests/fixtures/catalog/` |
-| Office hours are stale or a doctor removed them | `scraped_at` plus the stale flag; an empty parse keeps the stored rows |
+| Office hours are stale or a doctor removed them | Stored `scraped_at` plus the stale flag; an empty parse keeps the stored rows |
 | CCIS list shows email as an image | Take email from the faculty profile page |
 | Site layout changes break scrapers | Keep old data, log failures, test selectors against saved HTML fixtures |
 | Arabic search misses due to spelling variants | Normalization plus tests in `test_arabic.py` |

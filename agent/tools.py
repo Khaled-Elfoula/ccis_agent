@@ -77,10 +77,11 @@ SEARCH_KB_DECLARATION = types.FunctionDeclaration(
     name="search_kb",
     description=(
         "Search the College of Computer and Information Sciences knowledge base: college overview and "
-        "departments, bachelor/master/PhD programs, admission requirements, transfer conditions, forms "
-        "and regulations, and the college's contact details and academic affairs agency. "
-        "Use it for any factual question about the college before answering; do not answer such questions "
-        "from memory. Queries may be Arabic or English. "
+        "departments, admission steps, transfer conditions, forms and regulations, and the college's "
+        "contact details and academic affairs agency. Use it for general factual questions about the "
+        "college before answering; do not answer such questions from memory. For a list of degree "
+        "programmes, or for one programme's admission conditions, use list_programs instead. "
+        "Queries may be Arabic or English. "
         "Returns a ranked list of passages, each with the passage text, the page title, the source_url to "
         "cite and the scraped_at date to check for staleness. "
         "Returns {\"error\": ...} when nothing matches, which means you must not invent an answer."
@@ -318,10 +319,10 @@ GET_OFFICE_HOURS_DECLARATION = types.FunctionDeclaration(
         "Return a faculty member's published office hours, read from their profile page. "
         "Read-only: it never books, reserves or sends anything, and it does not estimate or compute "
         "free times. "
-        "Returns {faculty, office_hours: [{day, start, end}]}, plus the "
-        "that day; unreadable_rows counts published rows whose times could not be read. "
+        "Returns {faculty, office_hours: [{day, start, end}]}, plus day when the user asked for one "
+        "day; unreadable_rows counts published rows whose times could not be read. "
         "When the doctor has no published office hours at all it returns {no_office_hours: true, "
-        "faculty, email, office, profile_url} instead, so you can give their email and "
+        "faculty, email, office, profile_url} instead, so you can give their email and office. "
         "When the name is not confirmed it returns {status: 'candidates, not confirmed', message, "
         "candidates: [...]}: ask the user 'did you mean X?' and never present a candidate as the "
         "answer. Returns {\"error\": ...} when nobody matches."
@@ -643,6 +644,133 @@ GET_CALENDAR_DECLARATION = types.FunctionDeclaration(
 )
 
 
+PROGRAM_LEVELS = {
+    "bachelor": "بكالوريوس",
+    "bsc": "بكالوريوس",
+    "بكالوريوس": "بكالوريوس",
+    "master": "ماجستير",
+    "masters": "ماجستير",
+    "ماجستير": "ماجستير",
+    "phd": "دكتوراه",
+    "doctorate": "دكتوراه",
+    "دكتوراه": "دكتوراه",
+}
+PROGRAM_DEPARTMENTS = {
+    "CS": "CS",
+    "علوم الحاسب": "CS",
+    "CE": "CE",
+    "هندسة الحاسب": "CE",
+    "IT": "IT",
+    "تقنية المعلومات": "IT",
+    "SE": "SE",
+    "هندسة البرمجيات": "SE",
+    "IS": "IS",
+    "نظم المعلومات": "IS",
+    "shared": "مشترك",
+    "مشترك": "مشترك",
+}
+PROGRAM_LIST_LIMIT = 100
+
+
+def list_programs(
+    level: str | None = None,
+    department: str | None = None,
+    include_requirements: bool = False,
+    db_path: str | Path | None = None,
+) -> list[dict] | dict:
+    """List every stored degree programme, optionally for one level or department."""
+    sql = [
+        "SELECT degree, department, name_ar, requirements_ar, source_url, scraped_at",
+        "FROM programs",
+    ]
+    params: list[object] = []
+    conditions: list[str] = []
+    if level and str(level).strip():
+        wanted = PROGRAM_LEVELS.get(str(level).strip().lower())
+        if wanted is None:
+            return {"error": "unknown level"}
+        conditions.append("degree = ?")
+        params.append(wanted)
+    if department and str(department).strip():
+        raw = str(department).strip()
+        wanted = PROGRAM_DEPARTMENTS.get(raw) or PROGRAM_DEPARTMENTS.get(raw.upper())
+        if wanted is None:
+            return {"error": "unknown department"}
+        conditions.append("department = ?")
+        params.append(wanted)
+    if conditions:
+        sql.append("WHERE " + " AND ".join(conditions))
+    sql.append(
+        "ORDER BY CASE degree WHEN 'بكالوريوس' THEN 1 WHEN 'ماجستير' THEN 2"
+        " WHEN 'دكتوراه' THEN 3 ELSE 4 END, department, id"
+    )
+    sql.append("LIMIT ?")
+    params.append(PROGRAM_LIST_LIMIT)
+
+    try:
+        conn = database.connect(db_path or config.DB_PATH)
+        try:
+            rows = conn.execute(" ".join(sql), params).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return {"error": f"program list unavailable: {exc}"}
+    if not rows:
+        return {"error": "no matching program"}
+
+    result = []
+    for row in rows:
+        record = {
+            "degree": row["degree"],
+            "department": row["department"],
+            "name": row["name_ar"],
+            "source_url": row["source_url"],
+            "scraped_at": row["scraped_at"],
+        }
+        if include_requirements:
+            record["requirements"] = row["requirements_ar"]
+        result.append(record)
+    return result
+
+
+LIST_PROGRAMS_DECLARATION = types.FunctionDeclaration(
+    name="list_programs",
+    description=(
+        "List the college's degree programmes from its three program pages: every bachelor, "
+        "master and PhD programme, with its department. Use it whenever the user asks what "
+        "programmes the college offers, or asks about the programmes of one department or one "
+        "level. Return every programme the tool gives; do not answer with only one when several "
+        "match. Set include_requirements only when the user asks about admission conditions."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "level": types.Schema(
+                type=types.Type.STRING,
+                enum=["bachelor", "master", "phd"],
+                description="Optional level: bachelor, master or phd. Omit for all levels.",
+            ),
+            "department": types.Schema(
+                type=types.Type.STRING,
+                enum=["CS", "CE", "IT", "SE", "IS", "shared"],
+                description=(
+                    "Optional department: CS, CE, IT, SE, IS, or shared for a joint programme. "
+                    "Omit for every department."
+                ),
+            ),
+            "include_requirements": types.Schema(
+                type=types.Type.BOOLEAN,
+                description=(
+                    "Include each programme's admission conditions. Use it only when the user asks "
+                    "about admission requirements."
+                ),
+            ),
+        },
+        required=[],
+    ),
+)
+
+
 EMAIL_SUBJECTS = {"ar": "استفسار: {summary}", "en": "Enquiry: {summary}"}
 
 
@@ -771,6 +899,8 @@ def _course_summary(row: dict) -> dict:
         "name": row["name_ar"],
         "credit_hours": row["credit_hours"],
         "description": description or None,
+        "source_url": row["source_url"],
+        "scraped_at": row["scraped_at"],
     }
 
 
@@ -820,7 +950,8 @@ FIND_COURSE_DECLARATION = types.FunctionDeclaration(
         "list this code as a prerequisite. "
         "A null name means the catalog does not list a name for that course: say the name is not listed "
         "and give the description, never guess a name. "
-        "Several matches return only code, name, credit hours and a short description. "
+        "Several matches return code, name, credit hours, a short description and the source. "
+        "Every result includes source_url and scraped_at. "
         "Returns {\"error\": \"no matching course\"} when nothing matches."
     ),
     parameters=types.Schema(
@@ -1070,6 +1201,7 @@ TOOLS = [
             LIST_COURSES_DECLARATION,
             DRAFT_EMAIL_DECLARATION,
             HANDOFF_DECLARATION,
+            LIST_PROGRAMS_DECLARATION,
         ]
     )
 ]
@@ -1082,6 +1214,7 @@ HANDLERS = {
     "handoff": handoff,
     "find_course": find_course,
     "list_courses": list_courses,
+    "list_programs": list_programs,
 }
 
 

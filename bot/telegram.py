@@ -44,7 +44,6 @@ HELP_TEXT = (
     "أستطيع المساعدة في: البرامج والأقسام، شروط القبول، المواعيد، بيانات المرشد "
     "وأعضاء هيئة التدريس، الساعات المكتبية المنشورة، وتحويل الحالات المعقدة مع قالب بريد.\n"
     "/reset لمسح المحادثة."
-    "/reset لمسح المحادثة."
 )
 
 RESET_TEXT = "Conversation cleared. تم مسح المحادثة."
@@ -53,9 +52,12 @@ TOO_MANY_TEXT = "One moment please, that's a lot of messages. لحظة من فض
 
 TOOL_INTENTS = {
     "search_kb": "kb",
+    "list_programs": "programs",
     "get_calendar": "calendar",
     "find_contact": "contact",
     "get_office_hours": "office_hours",
+    "find_course": "courses",
+    "list_courses": "courses",
     "draft_email": "email_template",
     "handoff": "handoff",
 }
@@ -173,6 +175,5 @@ async def _answer(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
             await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
     if task.exception() is not None:
         logger.error("chat=%s agent failed: %s", chat_id, type(task.exception()).__name__)
-        return FRIENDLY_ERROR
         return FRIENDLY_ERROR
     return task.result()
