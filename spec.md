@@ -77,6 +77,8 @@ ccis-agent/
 │   ├── faculty.py           # faculty list pages
 │   ├── profiles.py          # faculty profile pages
 │   ├── calendar.py          # academic calendar page
+│   ├── deadlines.py         # student academic movements page
+│   ├── catalog.py           # SE course catalog page
 │   └── run.py               # the refresh command
 ├── db/
 │   ├── schema.sql
@@ -89,6 +91,8 @@ ccis-agent/
 └── tests/
     ├── test_tools.py
     ├── test_calendar.py
+    ├── test_deadlines.py
+    ├── test_catalog.py
     ├── test_arabic.py
     ├── test_names.py
     ├── test_hardening.py
@@ -145,11 +149,43 @@ CREATE TABLE calendar_events (    -- from dar.ksu.edu.sa/ar/current
   source_url TEXT NOT NULL,
   scraped_at TEXT NOT NULL
 );
+
+CREATE TABLE academic_deadlines (   -- from dar.ksu.edu.sa/ar/academictable
+  id INTEGER PRIMARY KEY,
+  academic_year TEXT NOT NULL,      -- "2026-2027", from the page heading
+  term TEXT,                        -- the term heading as the page writes it
+  title TEXT NOT NULL,              -- the movement, as the page writes it
+  kind TEXT NOT NULL,               -- 'action' | 'holiday' | 'semester_start' | 'exam'
+  start_date TEXT,                  -- ISO YYYY-MM-DD; null when the row carries no date
+  end_date TEXT,                    -- ISO YYYY-MM-DD; null for a one-date row
+  start_weekday TEXT, end_weekday TEXT,   -- as the page writes them
+  note TEXT,                        -- the * footnote, or the row's own text when it has no dates
+  page_updated TEXT,                -- the page's "آخر تحديث" line
+  source_url TEXT NOT NULL, scraped_at TEXT NOT NULL
+);
+
+CREATE TABLE courses (              -- from ccis.ksu.edu.sa/ar/se/se-course-catalog
+  id INTEGER PRIMARY KEY,
+  code_display TEXT NOT NULL,       -- as written, e.g. "هاب٣١٢"
+  code_norm TEXT NOT NULL,          -- ASCII digits, no space, e.g. "هاب312"
+  number INTEGER, level TEXT,       -- 'bachelor' (2xx-4xx) | 'graduate' (5xx-7xx)
+  name_ar TEXT,                     -- null when the page lists no name
+  hours_text TEXT,                  -- raw, e.g. "3(3+0+1)"
+  credit_hours INTEGER, lecture_hours INTEGER, lab_hours INTEGER, tutorial_hours INTEGER,
+  prerequisites_text TEXT, prerequisite_codes TEXT,          -- JSON list of code_norm
+  prerequisite_min_credit_hours INTEGER,                     -- 95 for "95 ساعة"
+  corequisites_text TEXT, corequisite_codes TEXT,            -- JSON list of code_norm
+  description_ar TEXT,
+  name_en TEXT, description_en TEXT,  -- null until the English page is scraped
+  source_url TEXT NOT NULL, scraped_at TEXT NOT NULL
+);
 ```
 
-The calendar keeps **one row per date**: `بداية ...` and `نهاية ...` are separate rows and no date range is computed or stored. The parser checks each weekday against its Gregorian date and flags a mismatch; it never corrects one.
+The calendar keeps **one row per date**: `بداية ...` and `نهاية ...` are separate rows and no date range is computed or stored. The academic table keeps one row per movement, with its start and end dates as the page gives them. Both parsers check each weekday against its Gregorian date and flag a mismatch; neither corrects one.
 
-**Arabic normalization** (applied to indexed text and to queries): remove tashkeel and tatweel, unify أ إ آ → ا, ى → ي, ة → ه, normalize Arabic-Indic digits to ASCII.
+`courses` hours follow the page's `credit(lecture+lab+tutorial)` form: `3(3+0+1)` is 3 credit hours, 3 lecture hours, 0 lab hours and 1 tutorial hour a week. Prerequisites are course codes joined by `+`, or a credit-hour requirement such as `95 ساعة`, which is stored as `prerequisite_min_credit_hours` rather than as a code. Every anomaly the parser meets (an empty name, an hours text it cannot read, a duplicate code, a missing label) is reported and left unfixed.
+
+**Arabic normalization** (applied to indexed text and to queries): remove tashkeel and tatweel, unify أ إ آ → ا, ى → ي, ة → ه, fold the Persian letter forms ھ ی ک to ه ي ك, and normalize Arabic-Indic digits to ASCII.
 
 ## 8. Tools
 
@@ -158,11 +194,13 @@ All tools return JSON. Every factual result includes `source_url` and `scraped_a
 | Tool | Input | Output |
 |---|---|---|
 | `search_kb` | `query: str`, `lang?: "ar"\|"en"`, `limit?: int=5` | `[{text, title, source_url, scraped_at}]` ranked by FTS5 |
-| `get_calendar` | `topic?: str`, `term?: str`, `upcoming_only?: bool` | `[{title, term, academic_year, weekday, date_gregorian, date_hijri, source_url, scraped_at, is_past}]` |
-| `find_contact` | `person_or_role: str` | `[{name, rank, department, building, room, email, email_source, profile_url, source_url, scraped_at}]` |
-| `get_office_hours` | `faculty_name: str`, `day?: str` | `{faculty, office_hours: [{day, start, end}], source_url, scraped_at}`; or `{no_office_hours: true, faculty, email, email_source, office, profile_url}`; or `{status: "candidates, not confirmed", ...}` when the name is ambiguous |
-| `draft_email` | `to: str`, `case_summary: str`, `lang: "ar"\|"en"` | `{subject, body, email_source}` with `[Your name]`, `[Your ID]` placeholders |
-| `handoff` | `reason: str`, `contact: str`, `lang: "ar"\|"en"` | `{message, email_source}` containing reason, contact and template |
+| `get_calendar` | `topic?: str`, `term?: str`, `upcoming_only?: bool` | `[{title, term, academic_year, kind, start_date, end_date, weekdays, date_hijri, note, status, days_left_until_end?, days_until_start?, source_url, scraped_at}]`, from `calendar_events` and `academic_deadlines` together |
+| `find_course` | `query: str`, `level?: "bachelor"\|"graduate"` | one exact code: `{code, code_display, name, level, hours{credit, lecture, lab, tutorial, text}, prerequisites{text, codes, min_credit_hours}, corequisites{text, codes}, description, unlocks[], source_url, scraped_at}`; several matches: `[{code, name, credit_hours, description}]` (max 5) |
+| `list_courses` | `level?: "bachelor"\|"graduate"` | `[{code, name, credit_hours, level}]` |
+| `find_contact` | `person_or_role: str` | `[{name, rank, department, building, room, email, profile_url, source_url, scraped_at}]` |
+| `get_office_hours` | `faculty_name: str`, `day?: str` | `{faculty, office_hours: [{day, start, end}], source_url, scraped_at}`; or `{no_office_hours: true, faculty, email, office, profile_url}`; or `{status: "candidates, not confirmed", ...}` when the name is ambiguous |
+| `draft_email` | `to: str`, `case_summary: str`, `lang: "ar"\|"en"` | `{subject, body}` with `[Your name]`, `[Your ID]` placeholders |
+| `handoff` | `reason: str`, `contact: str`, `lang: "ar"\|"en"` | `{message}` containing reason, contact and template |
 
 **Faculty identity.** The join key is the `username` in the faculty profile URL. CCIS list pages link to profiles in several shapes (`fac.ksu.edu.sa/<u>`, `faculty.ksu.edu.sa/ar/<u>`, `.../en/<u>`, `.../ar/<u>/cv/123`); extract it with `(?:fac|faculty)\.ksu\.edu\.sa/(?:(?:ar|en)/)?([A-Za-z0-9_.-]+)`.
 
@@ -170,12 +208,14 @@ All tools return JSON. Every factual result includes `source_url` and `scraped_a
 
 **Office hours** (read-only, never books):
 1. If the faculty member has rows in `office_hours`, return them, optionally filtered to one day, with `source_url` and `scraped_at`. Rows whose times cannot be read (bad `HH:MM`, or end not after start) are not reported; `unreadable_rows` counts them.
-2. If the person has no rows, return `{"no_office_hours": true}` with their email (and `email_source`), office and `profile_url`, so the agent can suggest writing to them.
+2. If the person has no rows, return `{"no_office_hours": true}` with their email, office and `profile_url`, so the agent can suggest writing to them.
 3. Nothing is estimated from a timetable, and no free time is computed.
 
-**Calendar.** `get_calendar` filters by topic and term using the same Arabic normalization as search (so `الحذف` matches `حذف`, and `الفصل الأول` matches the full term name). If the page has no such row, it returns an error and the agent says the event is not on the university calendar page. The page currently carries no drop/add (الحذف والإضافة) and no withdrawal (الانسحاب) rows.
+**Calendar and academic deadlines.** `get_calendar` is one tool over two tables: `calendar_events` (single dates) and `academic_deadlines` (start and end windows). It returns one shape for both and filters by topic and term with the same Arabic normalization as search (so `الحذف` matches `حذف`, and `الفصل الأول` matches the full term name). `TOPIC_SYNONYMS` in `agent/tools.py` maps what students say to the rows they mean: a course withdrawal (`اعتذار`, `انسحاب من مقرر`, `حذف مقرر`) reaches `الاعتذار عن مقرر دراسي` and `الحذف والإضافة`; `انسحاب من الجامعة` reaches `الانسحاب من الجامعة`; and a bare "withdraw" reaches both, because they are different movements. `status` (`past` | `open_now` | `upcoming`), `days_left_until_end` and `days_until_start` are computed in code; the model never does date arithmetic. A row with no date (the make-up exam request) has `status: null` and its text in `note`. If nothing matches, the tool returns an error and the agent says the date is not on the university calendar. Results are capped at 8, open rows first.
 
-**Email provenance.** `faculty.email_source` records where each address came from: `scraped` (read off the profile page), `derived` (built as `username@ksu.edu.sa` from the username, not confirmed on the page), `derived_unverified` (the same, but the profile page returned 403/404). `find_contact`, `draft_email` and `handoff` all return the label. A scraped email always wins over a stored derived one, and a profile fetch that finds no email keeps the stored address and its label.
+**Courses.** `find_course` reads a code written in any order or script (`هاب312`, `312 هاب`, `هاب ٣١٢`, `hab 312`) or words from a name or description, and `list_courses` lists the catalog by level. One exact code returns the full record, with `unlocks` (the courses that list this code as a prerequisite) computed at query time. A null `name` means the catalog lists none: the agent says so and gives the description rather than inventing a name.
+
+**Email provenance (internal only).** `faculty.email_source` records where each address came from: `scraped` (read off the profile page), `derived` (built as `username@ksu.edu.sa` from the username, not confirmed on the page), `derived_unverified` (the same, but the profile page returned 403/404). The column serves the refresh logic only: a scraped email always wins over a stored derived one, and a profile fetch that finds no email keeps the stored address and its label. No tool returns the label, no prompt mentions it and no answer says where an email came from; the tools return the email alone.
 
 ## 9. Agent loop
 
@@ -233,6 +273,8 @@ loop:
 | `fac_list_is` | IS faculty list | https://ccis.ksu.edu.sa/is/is-faculty-and-staff | weekly | **verified** |
 | `fac_profile` | Per-person: **email**, office, office hours | https://faculty.ksu.edu.sa/ar/<username> | weekly | email, office and office hours **verified** |
 | `ksu_calendar` | Academic calendar | https://dar.ksu.edu.sa/ar/current | daily | **verified** (saved copy in `tests/fixtures/calendar/`) |
+| `ksu_academic_table` | Student academic movements: add/drop, withdrawals, excuses, transfer, exemption, exams, holidays | https://dar.ksu.edu.sa/ar/academictable | weekly | **verified** (saved copy in `tests/fixtures/deadlines/`) |
+| `ccis_se_catalog` | SE course catalog: code, name, hours, prerequisites, co-requisites, description | https://ccis.ksu.edu.sa/ar/se/se-course-catalog | weekly | **verified** (saved copy in `tests/fixtures/catalog/`) |
 
 Allowed hosts: `ccis.ksu.edu.sa`, `cs.ksu.edu.sa`, `fac.ksu.edu.sa`, `faculty.ksu.edu.sa`, `dar.ksu.edu.sa`.
 
@@ -243,6 +285,8 @@ Allowed hosts: `ccis.ksu.edu.sa`, `cs.ksu.edu.sa`, `fac.ksu.edu.sa`, `faculty.ks
 - Profile fetches can time out. Use retries with backoff and stop after repeated throttling, keeping the old data.
 - Link shapes vary a lot (see Faculty identity above).
 - The calendar page is one table per term, four terms on the page (first semester, second semester, summer, and the next academic year), 22 dated rows in the saved copy. Each weekday matches its Gregorian date. It has no drop/add or withdrawal rows.
+- The academic-movements page is three tables, one per term, each inside a `<details>` whose `<summary>` names the term, 49 movements in the saved copy. Each row is الحركة الأكاديمية | البداية | النهاية, and each date cell holds the weekday and the date separated by a line break. A single-cell bold row marks a semester start. `تقديم طلب اختبار نهائي بديل` carries text instead of dates, so it is stored with no dates and its text as the note. The `*` row (أسبوع التعزيز الأكاديمي) takes the footnote under its table as its note. The page's last-update line is `أغسطس 6, 2026`. Every weekday matches its Gregorian date.
+- The SE catalog is 82 two-column tables, one per course, all 2-cell rows. Codes and hours use Arabic-Indic digits; the graduate rows use the Persian letter forms ھ ی ک. The level is the number's first digit: 2-4 is bachelor, 5-7 is graduate, so هاب٦٠٣ (6xx) and شامل٧٠٠ (7xx) are both graduate. `هاب٣١٤` has an empty name, `هاب٦٠٣`'s code row has no label, and `هاب٦٩٩` gives its hours as `وحدة دراسية واحدة`. All three are reported as anomalies and left unfixed. Prerequisites are codes joined by `+`, a credit-hour requirement (`95 ساعة`), or empty.
 
 ## 12. Configuration
 
@@ -269,6 +313,7 @@ Never commit `.env`. The database is committed on purpose after a refresh.
 | M3 | Agent loop + stop rules | Model calls `search_kb`, answers, and stops; 4-call limit enforced |
 | M4 | Arabic support | Arabic questions match Arabic pages; reply language follows the user |
 | M5 | Calendar + contacts | `get_calendar` and `find_contact` work with sources |
+| M5.1 | Deadlines + course catalog | `get_calendar` also answers academic movements from `academic_deadlines` with a code-computed status; `find_course` and `list_courses` answer from `courses`; both pages are saved as fixtures and parsed in tests |
 | M6 | Faculty identity + office hours | Faculty list + profile scrapers fill `faculty` and `office_hours`; names match with `rapidfuzz`; `get_office_hours` returns the published rows or says there are none |
 | M7 | Hand-off + templates | Petition-type request returns reason, contact and ar/en template |
 | M8 | Hardening + deploy | Failures keep old data; stale results are flagged; rate limit works; `scrapers.run --all` refreshes and prints counts; `scripts/prepare_deploy.py` prepares the database |
@@ -289,14 +334,17 @@ Each slice is committed separately and tested before the next one starts.
 9. An unanswerable question ends within 4 tool calls.
 10. If a user types a student ID or password, the agent tells them not to share it and does not repeat it.
 11. A broken selector in one scraper leaves existing data intact.
-12. A date question is answered from `calendar_events` with a link, or the agent says it is not on the university calendar page.
+12. A date question is answered from `calendar_events` or `academic_deadlines` with a link, or the agent says it is not on the university calendar page.
+13. "Can I still drop a course?" gives the status first ("open now until Saturday 28 November 2026") from the tool, and a bare "withdraw" is answered as two different things: a course withdrawal and a withdrawal from the university.
+14. "What are the hours of هاب٤٤٤?" answers 2 credit hours, 0 lecture, 4 lab and 1 tutorial, with no date arithmetic and no invented name for هاب٣١٤.
 
 ## 15. Risks and open questions
 
 | Risk / question | Mitigation |
 |---|---|
 | The calendar page changes layout or moves | Parser raises on a missing table and the stored rows are kept; saved copy in `tests/fixtures/calendar/` |
-| The calendar has no drop/add or withdrawal rows | The agent says so instead of guessing; check the page again each term |
+| The calendar has no drop/add or withdrawal rows | Those movements come from `academic_deadlines`; a topic that matches neither table returns an error and the agent says so instead of guessing |
+| The catalog page changes layout | The parser finds labels by text, reports anomalies instead of fixing them, and raises on a page with no course; saved copy in `tests/fixtures/catalog/` |
 | Office hours are stale or a doctor removed them | `scraped_at` plus the stale flag; an empty parse keeps the stored rows |
 | CCIS list shows email as an image | Take email from the faculty profile page |
 | Site layout changes break scrapers | Keep old data, log failures, test selectors against saved HTML fixtures |

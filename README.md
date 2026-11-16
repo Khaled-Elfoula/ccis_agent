@@ -33,8 +33,10 @@ cp .env.example .env      # then fill in the three required values
 The database is filled by hand, never by the running bot:
 
 ```bash
-python -m scrapers.run --all        # college pages, faculty lists, academic calendar + row counts
+python -m scrapers.run --all        # every source below plus row counts
 python -m scrapers.run --calendar   # only the academic calendar
+python -m scrapers.run --deadlines  # only the academic-movements table
+python -m scrapers.run --catalog    # only the SE course catalog
 python -m scrapers.run --faculty    # faculty lists and profiles (slow; respects throttling)
 ```
 
@@ -69,29 +71,36 @@ python -m pytest -q
 ```
 
 The suite runs offline: the model is replaced by a scripted fake, and every scraper test uses saved HTML
-fixtures. The calendar parser is tested against `tests/fixtures/calendar/current.html`.
+fixtures. The calendar, academic-movements and course-catalog parsers are tested against
+`tests/fixtures/calendar/current.html`, `tests/fixtures/deadlines/academic_table.html` and
+`tests/fixtures/catalog/se_course_catalog.html`.
 
 ## Layout
 
 | Path | What it holds |
 |---|---|
 | `agent/loop.py` | The tool-calling loop, stop rules, retries and the fallback model |
-| `agent/tools.py` | `search_kb`, `get_calendar`, `find_contact`, `get_office_hours`, `draft_email`, `handoff` |
+| `agent/tools.py` | `search_kb`, `get_calendar`, `find_contact`, `get_office_hours`, `find_course`, `list_courses`, `draft_email`, `handoff` |
 | `agent/prompts.py` | Loads the system prompt from the marked block in `agent.md` |
 | `agent/names.py`, `agent/arabic.py` | Arabic normalization and faculty name matching |
 | `bot/telegram.py` | Telegram adapter, rate limit, reply splitting, turn logging |
 | `scrapers/` | One module per source plus the refresh command |
-| `db/schema.sql` | `pages`, `chunks`, `faculty`, `office_hours`, `calendar_events` |
+| `db/schema.sql` | `pages`, `chunks`, `faculty`, `office_hours`, `calendar_events`, `academic_deadlines`, `courses` |
 | `scripts/` | Data reports, email filling and `prepare_deploy.py` |
 | `spec.md`, `agent.md` | The specification and the runtime system prompt |
 
 ## Data notes
 
 - Only the URLs in `scrapers/sources.py` are fetched, all on allowed KSU hosts.
-- Emails are read from faculty profile pages. When an address is not on the page, `email_source` says whether
-  it was derived from the username and whether the profile could be opened.
+- Emails come from the faculty directory and profile pages. The internal `email_source` column records how
+  each address was obtained and is used only when refreshing data; no tool returns it and no answer mentions it.
 - Office hours are the doctor's published rows. The agent never estimates availability and never computes free
   time.
 - The academic calendar is stored one row per date; `بداية` and `نهاية` are separate rows and no range is
-  computed. The current page has no drop/add or withdrawal rows, so the agent says such a date is not on the
-  page instead of guessing.
+  computed. The student academic movements (add/drop, withdrawals, excuses, transfer, exemption, exams,
+  holidays) come from the academic-movements page and are stored as start and end windows. `get_calendar`
+  reads both and computes the status and the days left in code; the model never does date arithmetic.
+- The SE course catalog is stored one row per course. Hours follow the page's `credit(lecture+lab+tutorial)`
+  form, prerequisites are codes or a credit-hour requirement, and the anomalies the page contains (an empty
+  name, an hours text in words, a code row without a label) are reported by the refresh command and left
+  unfixed.

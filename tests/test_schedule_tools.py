@@ -45,7 +45,7 @@ def test_no_office_hours_returns_the_contact_details(faculty_db):
     assert result["no_office_hours"] is True
     assert "office_hours" not in result
     assert result["email"] == "swakeel@ksu.edu.sa"
-    assert result["email_source"] == "scraped"
+    assert "email_source" not in result
     assert result["office"] == {"building": None, "room": "2206"}
     assert result["profile_url"] == "https://faculty.ksu.edu.sa/ar/sampleonly"
 
@@ -114,6 +114,8 @@ def test_office_hours_never_books_anything(faculty_db):
         "get_calendar",
         "find_contact",
         "get_office_hours",
+        "find_course",
+        "list_courses",
         "draft_email",
         "handoff",
     }

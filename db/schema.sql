@@ -82,3 +82,47 @@ CREATE TABLE IF NOT EXISTS calendar_events (
 );
 
 CREATE INDEX IF NOT EXISTS calendar_events_date_idx ON calendar_events(date_gregorian);
+CREATE TABLE IF NOT EXISTS academic_deadlines (
+  id INTEGER PRIMARY KEY,
+  academic_year TEXT NOT NULL,   -- from the page heading, e.g. "2026-2027"
+  term TEXT,                     -- term heading as the page writes it
+  title TEXT NOT NULL,           -- the movement, as the page writes it
+  kind TEXT NOT NULL,            -- 'action' | 'holiday' | 'semester_start' | 'exam'
+  start_date TEXT,               -- ISO YYYY-MM-DD, null when the row carries no date
+  end_date TEXT,                 -- ISO YYYY-MM-DD, null for a one-date row
+  start_weekday TEXT,            -- as the page writes it
+  end_weekday TEXT,              -- as the page writes it
+  note TEXT,                     -- the * footnote, or the row's own text when it has no dates
+  page_updated TEXT,             -- the page's "آخر تحديث" line
+  source_url TEXT NOT NULL,
+  scraped_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS academic_deadlines_start_idx ON academic_deadlines(start_date);
+
+CREATE TABLE IF NOT EXISTS courses (
+  id INTEGER PRIMARY KEY,
+  code_display TEXT NOT NULL,            -- as the page writes it, e.g. "هاب٣١٢"
+  code_norm TEXT NOT NULL,               -- ASCII digits, no space, e.g. "هاب312"
+  number INTEGER,                        -- 312
+  level TEXT,                            -- 'bachelor' | 'graduate'
+  name_ar TEXT,                          -- null when the page lists no name
+  hours_text TEXT,                       -- raw, e.g. "3(3+0+1)"
+  credit_hours INTEGER,                  -- 3 in "3(3+0+1)"
+  lecture_hours INTEGER,                 -- 3 in "3(3+0+1)"
+  lab_hours INTEGER,                     -- 0 in "3(3+0+1)"
+  tutorial_hours INTEGER,                -- 1 in "3(3+0+1)"
+  prerequisites_text TEXT,               -- raw, e.g. "هاب٢١١ + عال١١٣" or "95 ساعة"
+  prerequisite_codes TEXT,               -- JSON list of code_norm
+  prerequisite_min_credit_hours INTEGER, -- 95 for "95 ساعة", else null
+  corequisites_text TEXT,                -- raw
+  corequisite_codes TEXT,                -- JSON list of code_norm
+  description_ar TEXT,
+  name_en TEXT,                          -- null until the English page is scraped (C5)
+  description_en TEXT,                   -- null until the English page is scraped (C5)
+  source_url TEXT NOT NULL,
+  scraped_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS courses_code_idx ON courses(code_norm);
+CREATE INDEX IF NOT EXISTS courses_number_idx ON courses(number);

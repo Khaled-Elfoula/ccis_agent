@@ -5,6 +5,7 @@ import re
 TATWEEL = "\u0640"
 _TASHKEEL = re.compile(r"[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED]")
 _ALEF = re.compile("[\u0623\u0625\u0622\u0671]")
+_PERSIAN = str.maketrans({"ھ": "ه", "ی": "ي", "ک": "ك"})
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 _NON_WORD = re.compile(r"[^\w]+", re.UNICODE)
 _ARABIC_LETTER = re.compile(r"[\u0621-\u064A\u0660-\u0669\u06F0-\u06F9]")
@@ -28,6 +29,7 @@ def normalize_arabic(text: str) -> str:
     text = text.replace(TATWEEL, "")
     text = _TASHKEEL.sub("", text)
     text = _ALEF.sub("\u0627", text)
+    text = text.translate(_PERSIAN)
     text = text.replace("\u0649", "\u064A").replace("\u0629", "\u0647")
     text = text.translate(_ARABIC_DIGITS)
     return _WHITESPACE.sub(" ", text).strip()

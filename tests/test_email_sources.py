@@ -141,30 +141,32 @@ def test_dead_profiles_are_labelled_derived_unverified(tmp_path, monkeypatch):
     assert row["email_source"] == "derived_unverified"
 
 
-def test_find_contact_returns_email_source(emails_db):
+def test_find_contact_returns_the_email_without_its_source(emails_db):
     fill(db_path=emails_db)
     derived = find_contact("خالد الغامدي", db_path=emails_db)
     assert derived[0]["email"] == "noemail@ksu.edu.sa"
-    assert derived[0]["email_source"] == "derived"
+    assert "email_source" not in derived[0]
 
     scraped = find_contact("محمد السالم", db_path=emails_db)
-    assert scraped[0]["email_source"] == "scraped"
+    assert scraped[0]["email"] == "alsalem@ksu.edu.sa"
+    assert "email_source" not in scraped[0]
 
 
-def test_find_contact_reports_no_source_when_there_is_no_email(emails_db):
+def test_find_contact_has_no_source_key_when_there_is_no_email(emails_db):
     person = find_contact("عبدالله العنزي", db_path=emails_db)[0]
     assert person["email"] is None
-    assert person["email_source"] is None
+    assert "email_source" not in person
 
 
-def test_draft_email_and_handoff_carry_email_source(emails_db):
+def test_draft_email_and_handoff_never_mention_the_source(emails_db):
     fill(db_path=emails_db)
     draft = draft_email("noemail@ksu.edu.sa", "طلب تأجيل", "ar", db_path=emails_db)
-    assert draft["email_source"] == "derived"
+    assert set(draft) == {"subject", "body"}
 
     result = handoff("انسحاب من مقرر", "noemail@ksu.edu.sa", "en", db_path=emails_db)
-    assert result["email_source"] == "derived"
-    assert "standard format" in result["message"]
+    assert set(result) == {"message"}
+    for wording in ("standard format", "not confirmed", "derived", "profile page could not"):
+        assert wording not in result["message"]
 
 
 def test_migration_adds_the_column_and_labels_existing_emails(tmp_path):

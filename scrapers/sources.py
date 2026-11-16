@@ -55,9 +55,13 @@ FACULTY_LISTS: tuple[FacultyList, ...] = (
 FACULTY_LISTS_BY_ID = {faculty_list.id: faculty_list for faculty_list in FACULTY_LISTS}
 
 CALENDAR = Source("ksu_calendar", "https://dar.ksu.edu.sa/ar/current", "ar", "daily")
+DEADLINES = Source("ksu_academic_table", "https://dar.ksu.edu.sa/ar/academictable", "ar", "weekly")
+COURSE_CATALOG = Source(
+    "ccis_se_catalog", "https://ccis.ksu.edu.sa/ar/se/se-course-catalog", "ar", "weekly"
+)
 
 PROFILE_URL = "https://faculty.ksu.edu.sa/ar/{username}"
-PROFILE_URL = "https://faculty.ksu.edu.sa/ar/{username}"
+
 
 USERNAME_RE = re.compile(
     r"(?:fac|faculty)\.ksu\.edu\.sa/(?:(?:ar|en)/)?([A-Za-z0-9_.-]+)"

@@ -1,4 +1,4 @@
-"""Refresh the stored data: python -m scrapers.run [--all | --faculty | --calendar] [--only ID].
+"""Refresh the stored data: python -m scrapers.run [--all | --faculty | --calendar | --deadlines].
 
 Data is refreshed by hand, then the database is committed. Nothing runs on a schedule.
 """
@@ -11,11 +11,14 @@ import config
 import db as database
 from agent.arabic import search_form
 from agent.names import normalize_name
-from scrapers import ccis, faculty, profiles
+from scrapers import catalog, ccis, faculty, profiles
 from scrapers import calendar as ksu_calendar
+from scrapers import deadlines as academic_table
 from scrapers.base import CACHE_DIR, ScrapeError, fetch
 from scrapers.sources import (
     CALENDAR,
+    COURSE_CATALOG,
+    DEADLINES,
     FACULTY_LISTS,
     FACULTY_LISTS_BY_ID,
     SOURCES,
@@ -26,7 +29,15 @@ logger = logging.getLogger("scrapers.run")
 MAX_CONSECUTIVE_FAILURES = 3
 MAX_PROFILE_SECONDS = 30.0
 THROTTLE_MARKERS = ("HTTP 403", "HTTP 429", "timed out", "timeout")
-TABLES = ("pages", "chunks", "faculty", "office_hours", "calendar_events")
+TABLES = (
+    "pages",
+    "chunks",
+    "faculty",
+    "office_hours",
+    "calendar_events",
+    "academic_deadlines",
+    "courses",
+)
 
 
 def store_page(conn, source_id: str, url: str, parsed: ccis.ParsedPage) -> int:
@@ -142,18 +153,165 @@ def run_calendar(force: bool = False) -> int:
         conn.close()
 
 
+def store_deadlines(
+    conn,
+    parsed: academic_table.Deadlines,
+    source_url: str,
+    scraped_at: str | None = None,
+) -> int:
+    """Replace the stored academic movements with the freshly parsed ones.
+
+    Only called after a successful parse, so a broken page never wipes the table.
+    """
+    scraped_at = scraped_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with conn:
+        conn.execute("DELETE FROM academic_deadlines WHERE source_url = ?", (source_url,))
+        conn.executemany(
+            "INSERT INTO academic_deadlines (academic_year, term, title, kind, start_date,"
+            " end_date, start_weekday, end_weekday, note, page_updated, source_url, scraped_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    row.academic_year,
+                    row.term,
+                    row.title,
+                    row.kind,
+                    row.start_date,
+                    row.end_date,
+                    row.start_weekday,
+                    row.end_weekday,
+                    row.note,
+                    row.page_updated,
+                    source_url,
+                    scraped_at,
+                )
+                for row in parsed.rows
+            ],
+        )
+    return len(parsed.rows)
+
+
+def scrape_deadlines(conn, only: set[str] | None = None, force: bool = False) -> int:
+    """Scrape the academic-movements page, returning the number of failures."""
+    if only and DEADLINES.id not in only:
+        return 0
+    try:
+        fetched = fetch(DEADLINES.id, DEADLINES.url, force=force)
+        parsed = academic_table.parse_deadlines(fetched.html)
+    except (ScrapeError, ccis.ParseError) as exc:
+        logger.error("%s: %s (existing data kept)", DEADLINES.id, exc)
+        return 1
+    count = store_deadlines(conn, parsed, DEADLINES.url)
+    mismatched = [row for row in parsed.rows if not row.weekday_matches]
+    if mismatched:
+        logger.warning(
+            "%s: %d rows whose weekday does not match the Gregorian date: %s",
+            DEADLINES.id,
+            len(mismatched),
+            ", ".join(f"{row.title} {row.start_date}" for row in mismatched),
+        )
+    note = " (not modified)" if fetched.not_modified else ""
+    print(f"{DEADLINES.id:22} {count:3} movements  {parsed.academic_year}{note}")
+    return 0
+
+
+def run_deadlines(force: bool = False) -> int:
+    """Refresh only the academic_deadlines table."""
+    conn = database.init_db(config.DB_PATH)
+    try:
+        return scrape_deadlines(conn, None, force)
+    finally:
+        conn.close()
+
+
+def store_courses(
+    conn,
+    parsed: catalog.Catalog,
+    source_url: str,
+    scraped_at: str | None = None,
+) -> int:
+    """Replace the stored courses with the freshly parsed ones.
+
+    Only called after a successful parse, so a broken page never wipes the table.
+    """
+    scraped_at = scraped_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with conn:
+        conn.execute("DELETE FROM courses WHERE source_url = ?", (source_url,))
+        conn.executemany(
+            "INSERT INTO courses (code_display, code_norm, number, level, name_ar, hours_text,"
+            " credit_hours, lecture_hours, lab_hours, tutorial_hours, prerequisites_text,"
+            " prerequisite_codes, prerequisite_min_credit_hours, corequisites_text,"
+            " corequisite_codes, description_ar, name_en, description_en, source_url, scraped_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    course.code_display,
+                    course.code_norm,
+                    course.number,
+                    course.level,
+                    course.name_ar,
+                    course.hours_text,
+                    course.credit_hours,
+                    course.lecture_hours,
+                    course.lab_hours,
+                    course.tutorial_hours,
+                    course.prerequisites_text,
+                    catalog.codes_json(course.prerequisite_codes),
+                    course.prerequisite_min_credit_hours,
+                    course.corequisites_text,
+                    catalog.codes_json(course.corequisite_codes),
+                    course.description_ar,
+                    course.name_en,
+                    course.description_en,
+                    source_url,
+                    scraped_at,
+                )
+                for course in parsed.courses
+            ],
+        )
+    return len(parsed.courses)
+
+
+def scrape_catalog(conn, only: set[str] | None = None, force: bool = False) -> int:
+    """Scrape the SE course catalog, returning the number of failures."""
+    if only and COURSE_CATALOG.id not in only:
+        return 0
+    try:
+        fetched = fetch(COURSE_CATALOG.id, COURSE_CATALOG.url, force=force)
+        parsed = catalog.parse_catalog(fetched.html)
+    except (ScrapeError, ccis.ParseError) as exc:
+        logger.error("%s: %s (existing data kept)", COURSE_CATALOG.id, exc)
+        return 1
+    count = store_courses(conn, parsed, COURSE_CATALOG.url)
+    for anomaly in parsed.anomalies:
+        print(f"ANOMALY {anomaly}")
+    note = " (not modified)" if fetched.not_modified else ""
+    print(f"{COURSE_CATALOG.id:22} {count:3} courses{note}")
+    return 0
+
+
+def run_catalog(force: bool = False) -> int:
+    """Refresh only the courses table."""
+    conn = database.init_db(config.DB_PATH)
+    try:
+        return scrape_catalog(conn, None, force)
+    finally:
+        conn.close()
+
 def table_counts(conn) -> dict[str, int]:
     """Row count per table, in a stable order."""
     return {table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in TABLES}
 
 
 def run_all(only: set[str] | None = None, force: bool = False) -> int:
-    """Refresh college pages, faculty lists and the calendar (never profiles)."""
+    """Refresh the college pages, faculty lists, calendar, academic table and catalog."""
     conn = database.init_db(config.DB_PATH)
     try:
         failures = scrape_pages(conn, only, force)
         failures += scrape_lists(conn, only, force)[0]
         failures += scrape_calendar(conn, only, force)
+        failures += scrape_deadlines(conn, only, force)
+        failures += scrape_catalog(conn, only, force)
         counts = table_counts(conn)
     finally:
         conn.close()
@@ -172,9 +330,14 @@ def main() -> None:
     parser.add_argument(
         "--all",
         action="store_true",
-        help="College pages, faculty lists and the calendar (not profiles), then row counts",
+        help="College pages, faculty lists, calendar, academic table and catalog (not profiles),"
+        " then row counts",
     )
     parser.add_argument("--calendar", action="store_true", help="Scrape only the academic calendar")
+    parser.add_argument(
+        "--deadlines", action="store_true", help="Scrape only the academic-movements table"
+    )
+    parser.add_argument("--catalog", action="store_true", help="Scrape only the SE course catalog")
     parser.add_argument("--max-profiles", type=int, help="Fetch at most this many profiles")
     parser.add_argument(
         "--resume", action="store_true", help="Skip profiles already downloaded"
@@ -185,9 +348,17 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
     only = {part.strip() for part in args.only.split(",") if part.strip()} if args.only else None
     if args.all:
-        known = set(SOURCES_BY_ID) | set(FACULTY_LISTS_BY_ID) | {CALENDAR.id}
+        known = set(SOURCES_BY_ID) | set(FACULTY_LISTS_BY_ID) | {
+            CALENDAR.id,
+            DEADLINES.id,
+            COURSE_CATALOG.id,
+        }
     elif args.calendar:
         known = {CALENDAR.id}
+    elif args.deadlines:
+        known = {DEADLINES.id}
+    elif args.catalog:
+        known = {COURSE_CATALOG.id}
     elif args.faculty:
         known = set(FACULTY_LISTS_BY_ID)
     else:
@@ -199,6 +370,10 @@ def main() -> None:
         raise SystemExit(1 if run_all(only, args.force) else 0)
     if args.calendar:
         raise SystemExit(1 if run_calendar(args.force) else 0)
+    if args.deadlines:
+        raise SystemExit(1 if run_deadlines(args.force) else 0)
+    if args.catalog:
+        raise SystemExit(1 if run_catalog(args.force) else 0)
     if args.faculty:
         raise SystemExit(1 if run_faculty(only, args.force, args.max_profiles, args.resume) else 0)
     raise SystemExit(1 if run(only, args.force) else 0)

@@ -1,5 +1,6 @@
 """Gemini function declarations and their SQLite-backed implementations."""
 
+import json
 import re
 import sqlite3
 from datetime import date, datetime, timezone
@@ -9,7 +10,7 @@ from google.genai import types
 
 import config
 import db as database
-from agent.arabic import fts_query, search_form
+from agent.arabic import fts_query, normalize_arabic, search_form
 from agent.names import MAX_CANDIDATES, load_overrides, match_faculty, normalize_name
 
 MAX_LIMIT = 20
@@ -115,9 +116,6 @@ def _contact(row: dict) -> dict:
         "building": row.get("building"),
         "room": row.get("room"),
         "email": row.get("email"),
-        # A row that has an email but no label predates the column, and every email
-        # stored back then was read off a page.
-        "email_source": (row.get("email_source") or "scraped") if row.get("email") else None,
         "profile_url": row.get("profile_url"),
         "source_url": row.get("list_url"),
         "scraped_at": row.get("scraped_at"),
@@ -189,13 +187,8 @@ FIND_CONTACT_DECLARATION = types.FunctionDeclaration(
     name="find_contact",
     description=(
         "Look up a college member by name and return their contact details: rank, department, office "
-        "(building and room), email, email_source, and the profile link. Arabic spelling variants, missing "
+        "(building and room), email and the profile link. Arabic spelling variants, missing "
         "middle names and titles such as د. or أ.د. are handled. "
-        "email_source says where the email came from: 'scraped' means it was read off the doctor's page and "
-        "can be given normally; 'derived' means it was built from the username in the standard university "
-        "format username@ksu.edu.sa and was not confirmed on the doctor's page; 'derived_unverified' means "
-        "the same but the profile page could not be opened, so it needs double-checking; null means there is "
-        "no email at all. Say which of these applies whenever you give an email. "
         "Returns a list with exactly one person when the match is confirmed. "
         "When the name is not confirmed it returns {status: 'candidates, not confirmed', message, "
         "candidates: [...]}: ask the user 'did you mean X?' and never present a candidate as the answer. "
@@ -226,8 +219,9 @@ DAY_ALIASES = {
     "saturday": "Saturday", "sat": "Saturday", "السبت": "Saturday",
 }
 
-CALENDAR_LIMIT = 40
+CALENDAR_LIMIT = 8
 TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
 
 def normalize_day(value: str | None) -> str | None:
     """Map an English or Arabic day name to its canonical English name."""
@@ -287,7 +281,6 @@ def get_office_hours(
             "no_office_hours": True,
             "faculty": person,
             "email": person.get("email"),
-            "email_source": person.get("email_source"),
             "office": {"building": person.get("building"), "room": person.get("room")},
             "profile_url": person.get("profile_url"),
         }
@@ -321,8 +314,7 @@ GET_OFFICE_HOURS_DECLARATION = types.FunctionDeclaration(
         "requested day when one was given. If office_hours is empty the doctor published no hours for "
         "that day; unreadable_rows counts published rows whose times could not be read. "
         "When the doctor has no published office hours at all it returns {no_office_hours: true, "
-        "faculty, email, email_source, office, profile_url} instead, so you can give their email and "
-        "office and suggest writing to them. "
+        "faculty, email, office, profile_url} instead, so you can give their email and "
         "When the name is not confirmed it returns {status: 'candidates, not confirmed', message, "
         "candidates: [...]}: ask the user 'did you mean X?' and never present a candidate as the "
         "answer. Returns {\"error\": ...} when nobody matches."
@@ -357,8 +349,23 @@ def _calendar_rows(db_path=None) -> tuple[list[dict], dict | None]:
             conn.close()
     except sqlite3.Error as exc:
         return [], {"error": f"calendar unavailable: {exc}"}
-    if not rows:
-        return [], {"error": "calendar is empty"}
+    return [dict(row) for row in rows], None
+
+
+def _deadline_rows(db_path=None) -> tuple[list[dict], dict | None]:
+    """Read every stored academic movement, or return the error to give the model."""
+    try:
+        conn = database.connect(db_path or config.DB_PATH)
+        try:
+            rows = conn.execute(
+                "SELECT title, term, academic_year, kind, start_date, end_date, start_weekday,"
+                " end_weekday, note, page_updated, source_url, scraped_at"
+                " FROM academic_deadlines ORDER BY start_date, id"
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return [], {"error": f"academic deadlines unavailable: {exc}"}
     return [dict(row) for row in rows], None
 
 
@@ -378,6 +385,72 @@ def _title_matches(topic: str, title: str) -> bool:
     return bool(wanted) and all(_token_matches(token, have) for token in wanted)
 
 
+# A topic a student may use, mapped to the title phrases it stands for. The specific
+# phrases come first, so "انسحاب من الجامعة" never falls through to the general
+# withdrawal entry. The general one covers a bare "withdraw", which is ambiguous: the
+# agent must then give both a course withdrawal and a university withdrawal.
+TOPIC_SYNONYMS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (
+        ("انسحاب من الجامعة", "withdraw from the university", "withdraw from university"),
+        ("الانسحاب من الجامعة",),
+    ),
+    (
+        (
+            "انسحاب من المقرر",
+            "انسحاب من مقرر",
+            "withdraw from a course",
+            "withdraw a course",
+            "drop a course",
+            "drop the course",
+            "حذف مقرر",
+        ),
+        ("الاعتذار عن مقرر دراسي", "الحذف والإضافة"),
+    ),
+    (
+        ("حذف و اضافه", "add drop", "add/drop", "add and drop"),
+        ("الحذف والإضافة",),
+    ),
+    (
+        ("اعتذار", "انسحاب", "withdraw", "withdrawal", "drop"),
+        ("الاعتذار عن مقرر دراسي", "الحذف والإضافة", "الانسحاب من الجامعة"),
+    ),
+    (("تاجيل", "postpone", "defer"), ("تأجيل الفصل الدراسي",)),
+    (
+        ("عذر غياب", "حرمان", "absence excuse", "deprivation"),
+        ("تقديم أعذار الغياب",),
+    ),
+    (("تحويل داخلي", "internal transfer"), ("التحويل الداخلي",)),
+    (
+        ("الاختبارات النهائيه", "final exam", "final exams", "finals"),
+        ("الاختبارات النهائية",),
+    ),
+    (
+        ("اختبار بديل", "make up exam", "makeup exam", "make-up exam"),
+        ("تقديم طلب اختبار نهائي بديل",),
+    ),
+    (("اعفاء", "exemption", "exempt"), ("الاعفاء عن مقرر دراسي",)),
+    (("اجازه", "holiday", "holidays", "break", "vacation"), ("إجازة",)),
+)
+
+
+def _topic_phrases(topic: str) -> list[str]:
+    """Expand a topic through the synonym table, or return it unchanged."""
+    tokens = search_form(topic).split()
+    for triggers, titles in TOPIC_SYNONYMS:
+        for trigger in triggers:
+            wanted = search_form(trigger).split()
+            if wanted and all(_token_matches(token, tokens) for token in wanted):
+                return list(titles)
+    return [topic]
+
+
+def _matches_topic(topic: str | None, title: str) -> bool:
+    """True when the topic, once expanded, matches this title."""
+    if not topic or not str(topic).strip():
+        return True
+    return any(_title_matches(phrase, title) for phrase in _topic_phrases(topic))
+
+
 def _term_matches(term: str, stored: str | None) -> bool:
     """True when the asked term is the stored term, allowing a shorter form."""
     wanted, have = search_form(term), search_form(stored or "")
@@ -389,6 +462,94 @@ def _flag(value) -> bool:
     return value is True or str(value).strip().lower() in ("true", "1", "yes")
 
 
+def _calendar_kind(title: str) -> str:
+    """Classify a single-date calendar row by its title."""
+    if title.startswith("إجازة"):
+        return "holiday"
+    if "اختبار" in title:
+        return "exam"
+    if title.startswith("بداية"):
+        return "semester_start"
+    return "action"
+
+
+def _weekdays(start: str | None, end: str | None) -> str | None:
+    """Name the weekday of each date, e.g. "الأحد – السبت"."""
+    if start and end and start != end:
+        return f"{start} – {end}"
+    return start or end
+
+
+def _calendar_record(row: dict) -> dict:
+    """One calendar page date in the shape get_calendar returns."""
+    return {
+        "title": row["title"],
+        "term": row["term"],
+        "academic_year": row["academic_year"],
+        "kind": _calendar_kind(row["title"]),
+        "start_date": row["date_gregorian"],
+        "end_date": row["date_gregorian"],
+        "weekdays": row["weekday"],
+        "date_hijri": row["date_hijri"],
+        "note": None,
+        "page_updated": None,
+        "source_url": row["source_url"],
+        "scraped_at": row["scraped_at"],
+    }
+
+
+def _deadline_record(row: dict) -> dict:
+    """One academic movement in the shape get_calendar returns."""
+    return {
+        "title": row["title"],
+        "term": row["term"],
+        "academic_year": row["academic_year"],
+        "kind": row["kind"],
+        "start_date": row["start_date"],
+        "end_date": row["end_date"],
+        "weekdays": _weekdays(row["start_weekday"], row["end_weekday"]),
+        "date_hijri": None,
+        "page_updated": row["page_updated"],
+        "note": row["note"],
+        "source_url": row["source_url"],
+        "scraped_at": row["scraped_at"],
+    }
+
+
+def _add_status(record: dict, today: str) -> dict:
+    """Compute past / open_now / upcoming and the days left, never left to the model."""
+    start, end = record["start_date"], record["end_date"]
+    if not start:
+        record["status"] = None
+        return record
+    finish = end or start
+    if finish < today:
+        record["status"] = "past"
+    elif start <= today:
+        record["status"] = "open_now"
+        record["days_left_until_end"] = (
+            date.fromisoformat(finish) - date.fromisoformat(today)
+        ).days
+    else:
+        record["status"] = "upcoming"
+        record["days_until_start"] = (
+            date.fromisoformat(start) - date.fromisoformat(today)
+        ).days
+    return record
+
+
+STATUS_ORDER = {"open_now": 0, "upcoming": 1, "past": 2, None: 3}
+
+
+def _sort_key(record: dict) -> tuple:
+    """Open rows first, and among them the one that closes soonest."""
+    if record["status"] == "open_now":
+        when = record["end_date"] or record["start_date"] or "9999-99-99"
+    else:
+        when = record["start_date"] or "9999-99-99"
+    return (STATUS_ORDER.get(record["status"], 3), when, record["title"])
+
+
 def get_calendar(
     topic: str | None = None,
     term: str | None = None,
@@ -396,40 +557,59 @@ def get_calendar(
     db_path: str | Path | None = None,
     today: date | None = None,
 ) -> list[dict] | dict:
-    """Return calendar events matching a topic and term, with their dates and sources."""
-    rows, error = _calendar_rows(db_path)
-    if error is not None:
-        return error
+    """Return calendar dates and academic movements matching a topic and term.
+
+    One tool for both sources: the calendar page's single dates and the
+    academic-movements table's windows. Each row carries its status and, when it is
+    open or upcoming, the days left or the days until it starts, all computed here.
+    """
+    events, events_error = _calendar_rows(db_path)
+    movements, movements_error = _deadline_rows(db_path)
+    if events_error is not None and movements_error is not None:
+        return events_error
+
+    records = [_calendar_record(row) for row in events]
+    records += [_deadline_record(row) for row in movements]
+    if not records:
+        return {"error": "calendar is empty"}
 
     now = (today or date.today()).isoformat()
     selected: list[dict] = []
-    for row in rows:
-        if topic and str(topic).strip() and not _title_matches(topic, row["title"]):
+    for record in records:
+        if not _matches_topic(topic, record["title"]):
             continue
-        if term and str(term).strip() and not _term_matches(term, row["term"]):
+        if term and str(term).strip() and not _term_matches(term, record["term"]):
             continue
-        row["is_past"] = row["date_gregorian"] < now
-        if _flag(upcoming_only) and row["is_past"]:
+        _add_status(record, now)
+        if _flag(upcoming_only) and record["status"] == "past":
             continue
-        selected.append(row)
+        selected.append(record)
     if not selected:
         return {"error": "no matching calendar events"}
+    selected.sort(key=_sort_key)
     return selected[:CALENDAR_LIMIT]
 
 
 GET_CALENDAR_DECLARATION = types.FunctionDeclaration(
     name="get_calendar",
     description=(
-        "Look up key dates and deadlines on the university's academic calendar: the start and end of "
-        "study, the national day and mid-year breaks, the academic reinforcement week, and the final "
-        "exam periods, for the first and second semesters and the summer term. "
-        "Use it for every date or deadline question; never answer one from memory. "
-        "Returns one row per date: {title, term, academic_year, weekday, date_gregorian, date_hijri, "
-        "source_url, scraped_at, is_past}. Each 'بداية ...' and 'نهاية ...' is its own row, and no date "
-        "range is computed. Set upcoming_only=true to leave out dates that have already passed. "
-        "Returns {\"error\": \"no matching calendar events\"} when the page has no such row: say the event "
-        "is not on the university calendar page and do not guess a date. "
-        "Returns {\"error\": \"calendar is empty\"} when the calendar has not been downloaded yet."
+        "Look up university dates and academic deadlines: the start and end of study, holidays, the "
+        "final exam periods and the summer term from the academic calendar page, and the student "
+        "academic movements (add/drop, course withdrawal, withdrawal from the university, postponing a "
+        "term, absence excuses, internal transfer, exemption, final and make-up exams, holidays) from the "
+        "academic-movements table. Use it for every date or deadline question; never answer one from "
+        "memory. "
+        "Returns rows {title, term, academic_year, kind, start_date, end_date, weekdays, date_hijri, "
+        "note, page_updated, status, source_url, scraped_at}, where kind is action, holiday, semester_start "
+        "or exam and status is past, open_now or upcoming. A row that is open now carries "
+        "days_left_until_end and an upcoming row carries days_until_start; a row with no date has status "
+        "null and its text in note. page_updated is the date the source page itself gives. Give the status "
+        "first, with the weekday and the date, and never compute a date or a count of days yourself. "
+        "Mention page_updated only when the result carries stale=true. "
+        "Set upcoming_only=true to leave out rows that have already ended. "
+        "Returns {\"error\": \"no matching calendar events\"} when nothing matches: say the date is not on "
+        "the university calendar and do not guess. "
+        "Returns {\"error\": \"calendar is empty\"} when neither page has been downloaded yet."
     ),
     parameters=types.Schema(
         type=types.Type.OBJECT,
@@ -437,8 +617,9 @@ GET_CALENDAR_DECLARATION = types.FunctionDeclaration(
             "topic": types.Schema(
                 type=types.Type.STRING,
                 description=(
-                    "What to look for, e.g. بداية الدراسة, الاختبارات النهائية, إجازة, الأسبوع "
-                    "التعزيزي. Arabic or English; omit for every row."
+                    "What to look for, e.g. بداية الدراسة, الاختبارات النهائية, إجازة, "
+                    "الاعتذار عن مقرر, الانسحاب من الجامعة, الحذف والإضافة, تأجيل الفصل, "
+                    "عذر غياب, تحويل داخلي, اختبار بديل, إعفاء. Arabic or English; omit for every row."
                 ),
             ),
             "term": types.Schema(
@@ -447,7 +628,7 @@ GET_CALENDAR_DECLARATION = types.FunctionDeclaration(
             ),
             "upcoming_only": types.Schema(
                 type=types.Type.BOOLEAN,
-                description="When true, leave out dates before today.",
+                description="When true, leave out rows that have already ended.",
             ),
         },
         required=[],
@@ -456,6 +637,248 @@ GET_CALENDAR_DECLARATION = types.FunctionDeclaration(
 
 
 EMAIL_SUBJECTS = {"ar": "استفسار: {summary}", "en": "Enquiry: {summary}"}
+
+
+COURSE_LIMIT = 5
+COURSE_LIST_LIMIT = 200
+DESCRIPTION_PREVIEW = 200
+
+# The catalog writes codes in Arabic letters, and students sometimes type the Latin
+# spelling of the department prefix. Only the prefixes that appear in the catalog are
+# mapped; anything else is left alone rather than guessed.
+LATIN_PREFIXES = {
+    "hab": "هاب",
+    "aal": "عال",
+    "nal": "نال",
+    "hal": "هال",
+    "riyad": "ريض",
+    "shamel": "شامل",
+}
+
+
+def _course_code(query: str) -> str | None:
+    """Read a course code written in any order or script, e.g. "312 هاب" or "hab 312"."""
+    text = normalize_arabic(query)
+    digits_part = "".join(re.findall(r"\d+", text))
+    if not digits_part:
+        return None
+    arabic = "".join(re.findall(r"[\u0621-\u064A]+", text))
+    if arabic:
+        return normalize_arabic(arabic) + digits_part
+    latin = "".join(re.findall(r"[A-Za-z]+", query)).lower()
+    prefix = LATIN_PREFIXES.get(latin)
+    return f"{prefix}{digits_part}" if prefix else None
+
+
+def _course_number(query: str) -> int | None:
+    """Read the number of a course code on its own, e.g. "312"."""
+    digits_part = "".join(re.findall(r"\d+", normalize_arabic(query)))
+    return int(digits_part) if digits_part else None
+
+
+def _course_rows(db_path=None) -> tuple[list[dict], dict | None]:
+    """Read every stored course, or return the error to give the model."""
+    try:
+        conn = database.connect(db_path or config.DB_PATH)
+        try:
+            rows = conn.execute(
+                "SELECT code_display, code_norm, number, level, name_ar, hours_text,"
+                " credit_hours, lecture_hours, lab_hours, tutorial_hours, prerequisites_text,"
+                " prerequisite_codes, prerequisite_min_credit_hours, corequisites_text,"
+                " corequisite_codes, description_ar, source_url, scraped_at"
+                " FROM courses ORDER BY number, code_norm"
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return [], {"error": f"course catalog unavailable: {exc}"}
+    return [dict(row) for row in rows], None
+
+
+def _code_list(value) -> list[str]:
+    """Read a stored JSON code list, tolerating an empty or broken value."""
+    try:
+        codes = json.loads(value or "[]")
+    except (TypeError, ValueError):
+        return []
+    return [str(code) for code in codes] if isinstance(codes, list) else []
+
+
+def _word_matches(text: str, row: dict) -> bool:
+    """True when every word of the query appears in the course name or description."""
+    wanted = [token for token in search_form(text).split() if len(token) > 1]
+    if not wanted:
+        return False
+    have = search_form(" ".join(filter(None, [row.get("name_ar"), row.get("description_ar")]))).split()
+    return all(_token_matches(token, have) for token in wanted)
+
+
+def _course_hours(row: dict) -> dict:
+    """Break the hours down, leaving a part null when the page did not give it."""
+    return {
+        "credit": row["credit_hours"],
+        "lecture": row["lecture_hours"],
+        "lab": row["lab_hours"],
+        "tutorial": row["tutorial_hours"],
+        "text": row["hours_text"],
+    }
+
+
+def _course_detail(row: dict, rows: list[dict]) -> dict:
+    """Everything the catalog holds about one course, plus the courses it unlocks."""
+    code = row["code_norm"]
+    unlocks = [
+        other["code_norm"]
+        for other in rows
+        if code in _code_list(other["prerequisite_codes"])
+    ]
+    return {
+        "code": code,
+        "code_display": row["code_display"],
+        "name": row["name_ar"],
+        "level": row["level"],
+        "hours": _course_hours(row),
+        "prerequisites": {
+            "text": row["prerequisites_text"],
+            "codes": _code_list(row["prerequisite_codes"]),
+            "min_credit_hours": row["prerequisite_min_credit_hours"],
+        },
+        "corequisites": {
+            "text": row["corequisites_text"],
+            "codes": _code_list(row["corequisite_codes"]),
+        },
+        "description": row["description_ar"],
+        "unlocks": unlocks,
+        "source_url": row["source_url"],
+        "scraped_at": row["scraped_at"],
+    }
+
+
+def _course_summary(row: dict) -> dict:
+    """Code, name, credit hours and a short description, for a list of matches."""
+    description = row["description_ar"] or ""
+    if len(description) > DESCRIPTION_PREVIEW:
+        description = description[: DESCRIPTION_PREVIEW - 1].rstrip() + "…"
+    return {
+        "code": row["code_norm"],
+        "name": row["name_ar"],
+        "credit_hours": row["credit_hours"],
+        "description": description or None,
+    }
+
+
+def find_course(
+    query: str,
+    level: str | None = None,
+    db_path: str | Path | None = None,
+) -> list[dict] | dict:
+    """Find a course by its code, in any form, or by words from its name or description."""
+    text = (query or "").strip()
+    if not text:
+        return {"error": "empty query"}
+    rows, error = _course_rows(db_path)
+    if error is not None:
+        return error
+    if not rows:
+        return {"error": "course catalog is empty"}
+
+    code = _course_code(text)
+    number = _course_number(text)
+    if code:
+        matches = [row for row in rows if row["code_norm"] == code]
+        if matches:
+            return [_course_detail(row, rows) for row in matches]
+        matches = [row for row in rows if number is not None and row["number"] == number]
+    elif number is not None:
+        matches = [row for row in rows if row["number"] == number]
+    else:
+        matches = [row for row in rows if _word_matches(text, row)]
+
+    if level and str(level).strip():
+        wanted = str(level).strip().lower()
+        matches = [row for row in matches if (row["level"] or "").lower() == wanted]
+    if not matches:
+        return {"error": "no matching course"}
+    return [_course_summary(row) for row in matches[:COURSE_LIMIT]]
+
+
+FIND_COURSE_DECLARATION = types.FunctionDeclaration(
+    name="find_course",
+    description=(
+        "Look up a course in the Software Engineering department catalog. The query may be a code in any "
+        "form ('هاب312', '312 هاب', 'هاب ٣١٢', 'hab 312') or words from the course name or description. "
+        "One exact code returns everything: the code as written, the name, the level, the hours broken "
+        "down (credit, lecture, lab and tutorial), the prerequisites (codes, or a minimum credit-hour "
+        "requirement), the co-requisites, the description, and 'unlocks', the codes of the courses that "
+        "list this code as a prerequisite. "
+        "A null name means the catalog does not list a name for that course: say the name is not listed "
+        "and give the description, never guess a name. "
+        "Several matches return only code, name, credit hours and a short description. "
+        "Returns {\"error\": \"no matching course\"} when nothing matches."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "query": types.Schema(
+                type=types.Type.STRING,
+                description="A course code or words from the course name or description.",
+            ),
+            "level": types.Schema(
+                type=types.Type.STRING,
+                enum=["bachelor", "graduate"],
+                description="Optional level filter.",
+            ),
+        },
+        required=["query"],
+    ),
+)
+
+
+def list_courses(
+    level: str | None = None,
+    db_path: str | Path | None = None,
+) -> list[dict] | dict:
+    """List the catalog's courses as code, name and credit hours, optionally for one level."""
+    rows, error = _course_rows(db_path)
+    if error is not None:
+        return error
+    if not rows:
+        return {"error": "course catalog is empty"}
+    if level and str(level).strip():
+        wanted = str(level).strip().lower()
+        rows = [row for row in rows if (row["level"] or "").lower() == wanted]
+    if not rows:
+        return {"error": "no matching course"}
+    return [
+        {
+            "code": row["code_norm"],
+            "name": row["name_ar"],
+            "credit_hours": row["credit_hours"],
+            "level": row["level"],
+        }
+        for row in rows[:COURSE_LIST_LIMIT]
+    ]
+
+
+LIST_COURSES_DECLARATION = types.FunctionDeclaration(
+    name="list_courses",
+    description=(
+        "List the Software Engineering catalog's courses as code, name, credit hours and level, for one "
+        "level or for both. Use it to show what a level offers, not to answer a question about one course "
+        "(use find_course for that). A null name means the catalog does not list one."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "level": types.Schema(
+                type=types.Type.STRING,
+                enum=["bachelor", "graduate"],
+                description="Optional level: bachelor or graduate. Omit for both.",
+            ),
+        },
+        required=[],
+    ),
+)
 
 EMAIL_BODIES = {
     "ar": (
@@ -505,24 +928,6 @@ def _invented_email(text: str, db_path=None) -> str | None:
     return None
 
 
-def _email_source(email: str | None, db_path=None) -> str | None:
-    """Return where a stored email came from, or None when we do not hold it."""
-    if not email or "@" not in email:
-        return None
-    try:
-        conn = database.connect(db_path or config.DB_PATH)
-        try:
-            row = conn.execute(
-                "SELECT email_source FROM faculty WHERE LOWER(email) = LOWER(?) LIMIT 1",
-                (email.strip(),),
-            ).fetchone()
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return None
-    return (row["email_source"] or "scraped") if row else None
-
-
 def _language(lang: str | None) -> str:
     """Return "ar" or "en", defaulting to English."""
     return "ar" if str(lang or "").strip().lower().startswith("ar") else "en"
@@ -545,7 +950,6 @@ def draft_email(
     return {
         "subject": EMAIL_SUBJECTS[language].format(summary=summary),
         "body": EMAIL_BODIES[language].format(summary=summary),
-        "email_source": _email_source(to, db_path),
     }
 
 
@@ -555,9 +959,7 @@ DRAFT_EMAIL_DECLARATION = types.FunctionDeclaration(
         "Draft a ready-to-send email to a contact about a student's case, in Arabic or English. "
         "Pass the recipient exactly as find_contact or a college page gave it; an email address that is not in "
         "the sources is refused. The body keeps the placeholders [Your name] and [Your ID] for the student to "
-        "fill in, and the agent never sends the email itself. Returns {subject, body, email_source}, where "
-        "email_source is the same label find_contact gave for that address (scraped, derived, "
-        "derived_unverified) or null when the address is not a stored faculty email."
+        "fill in, and the agent never sends the email itself. Returns {subject, body}."
     ),
     parameters=types.Schema(
         type=types.Type.OBJECT,
@@ -601,25 +1003,6 @@ def handoff(
     template = draft_email(contact_text, reason_text, lang, db_path)
     if "error" in template:
         return template
-    source = template.get("email_source")
-    note = ""
-    if source == "derived":
-        note = (
-            "\n\nملاحظة: هذا العنوان يتبع صيغة الجامعة القياسية username@ksu.edu.sa ولم يتم التأكد منه من صفحة "
-            "عضو هيئة التدريس."
-            if _language(lang) == "ar"
-            else "\n\nNote: this address follows the university's standard format "
-            "(username@ksu.edu.sa) and was not confirmed on the doctor's page."
-        )
-    elif source == "derived_unverified":
-        note = (
-            "\n\nملاحظة: هذا العنوان يتبع صيغة الجامعة القياسية username@ksu.edu.sa ولم يتم التأكد منه من صفحة "
-            "عضو هيئة التدريس، كما تعذّر فتح صفحته، لذا يُرجى التحقق منه."
-            if _language(lang) == "ar"
-            else "\n\nNote: this address follows the university's standard format "
-            "(username@ksu.edu.sa) and was not confirmed on the doctor's page. The profile page could "
-            "not be opened either, so please double-check it."
-        )
     if _language(lang) == "ar":
         message = (
             f"أحوّل حالتك إلى {contact_text}.\n"
@@ -634,7 +1017,7 @@ def handoff(
             f"Ready-to-send email:\n"
             f"Subject: {template['subject']}\n\n{template['body']}"
         )
-    return {"message": message + note, "email_source": source}
+    return {"message": message}
 
 
 HANDOFF_DECLARATION = types.FunctionDeclaration(
@@ -645,10 +1028,8 @@ HANDOFF_DECLARATION = types.FunctionDeclaration(
         "Give the reason in one sentence and the contact from find_contact or a college page. "
         "When an office has no published email, pass the office name and its page link and say the email was "
         "not found. An email that is not in the sources is refused. "
-        "Returns {message, email_source} with the reason, the contact and a ready email template that keeps "
-        "the placeholders [Your name] and [Your ID]. When email_source is 'derived' or 'derived_unverified' "
-        "the message already carries the note that the address follows the university's standard format and "
-        "was not confirmed on the doctor's page."
+        "Returns {message} with the reason, the contact and a ready email template that keeps "
+        "the placeholders [Your name] and [Your ID]."
     ),
     parameters=types.Schema(
         type=types.Type.OBJECT,
@@ -678,6 +1059,8 @@ TOOLS = [
             GET_CALENDAR_DECLARATION,
             FIND_CONTACT_DECLARATION,
             GET_OFFICE_HOURS_DECLARATION,
+            FIND_COURSE_DECLARATION,
+            LIST_COURSES_DECLARATION,
             DRAFT_EMAIL_DECLARATION,
             HANDOFF_DECLARATION,
         ]
@@ -690,6 +1073,8 @@ HANDLERS = {
     "get_office_hours": get_office_hours,
     "draft_email": draft_email,
     "handoff": handoff,
+    "find_course": find_course,
+    "list_courses": list_courses,
 }
 
 

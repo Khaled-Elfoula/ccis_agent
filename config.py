@@ -27,4 +27,3 @@ HISTORY_MESSAGES = _int("HISTORY_MESSAGES", 10)
 STALE_AFTER_DAYS = _int("STALE_AFTER_DAYS", 30)
 
 DB_PATH = Path(os.getenv("DB_PATH") or ROOT / "db" / "ccis.sqlite")
-DB_PATH = Path(os.getenv("DB_PATH") or ROOT / "db" / "ccis.sqlite")

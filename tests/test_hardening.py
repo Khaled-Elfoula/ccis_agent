@@ -201,7 +201,9 @@ def test_run_all_survives_every_failing_source_and_keeps_the_data(tmp_path, monk
     monkeypatch.setattr(run_module, "fetch", broken)
     failures = run_module.run_all()
 
-    assert failures == len(SOURCES) + len(FACULTY_LISTS) + 1
+    # The calendar, the academic table and the catalog are one source each on top of
+    # the college pages and the faculty lists.
+    assert failures == len(SOURCES) + len(FACULTY_LISTS) + 3
     conn = database.connect(path)
     assert conn.execute("SELECT COUNT(*) AS n FROM pages").fetchone()["n"] == 1
     assert conn.execute("SELECT COUNT(*) AS n FROM calendar_events").fetchone()["n"] == 22

@@ -64,20 +64,20 @@ def _text(cell) -> str:
     return WHITESPACE.sub(" ", cell.get_text("", strip=True)).strip()
 
 
-def _digits(text: str) -> str:
+def digits(text: str) -> str:
     """Use ASCII digits, so Arabic-Indic ones parse too."""
     return (text or "").translate(ARABIC_DIGITS)
 
 
 def _date(cell_text: str, pattern: re.Pattern) -> tuple[int, int, int] | None:
     """Read DD / MM / YYYY into (day, month, year)."""
-    match = pattern.search(_digits(cell_text))
+    match = pattern.search(digits(cell_text))
     if match is None:
         return None
     return int(match.group(1)), int(match.group(2)), int(match.group(3))
 
 
-def _iso_date(cell_text: str) -> str | None:
+def iso_date(cell_text: str) -> str | None:
     """Read the Gregorian cell as an ISO date, or None when it is not a real date."""
     parts = _date(cell_text, GREGORIAN_RE)
     if parts is None:
@@ -100,7 +100,7 @@ def _iso_hijri(cell_text: str) -> str | None:
     return f"{year:04d}-{month:02d}-{day:02d}"
 
 
-def _weekday_matches(weekday: str, iso_date: str) -> bool:
+def weekday_matches(weekday: str, iso_date: str) -> bool:
     """True when the written weekday is the one the Gregorian date actually falls on."""
     english = WEEKDAYS.get(weekday.strip())
     if english is None:
@@ -111,15 +111,23 @@ def _weekday_matches(weekday: str, iso_date: str) -> bool:
         return False
 
 
+def year_from_text(text: str) -> str | None:
+    """Read "2026 /2027" out of a heading as "2026-2027"."""
+    match = YEAR_RE.search(digits(text))
+    if match is None:
+        return None
+    return f"{match.group(1)}-{match.group(2)}"
+
+
 def _academic_year(soup: BeautifulSoup) -> str:
     """Read the academic year from the page heading, falling back to the title tag."""
     candidates = [node.get_text(" ", strip=True) for node in soup.find_all(["h1", "h2"])]
     if soup.title is not None:
         candidates.append(soup.title.get_text(" ", strip=True))
     for text in candidates:
-        match = YEAR_RE.search(_digits(text))
-        if match:
-            return f"{match.group(1)}-{match.group(2)}"
+        year = year_from_text(text)
+        if year:
+            return year
     raise ParseError("no academic year found on the calendar page")
 
 
@@ -154,10 +162,10 @@ def parse_calendar(html: str) -> Calendar:
                 continue
             title = _text(cells[0])
             weekday = _text(cells[1])
-            iso_date = _iso_date(_text(cells[2]))
-            if not title or not weekday or iso_date is None:
+            date_iso = iso_date(_text(cells[2]))
+            if not title or not weekday or date_iso is None:
                 continue
-            key = (term, title, iso_date)
+            key = (term, title, date_iso)
             if key in seen:
                 continue
             seen.add(key)
@@ -167,9 +175,9 @@ def parse_calendar(html: str) -> Calendar:
                     term=term,
                     title=title,
                     weekday=weekday,
-                    date_gregorian=iso_date,
+                    date_gregorian=date_iso,
                     date_hijri=_iso_hijri(_text(cells[3])),
-                    weekday_matches=_weekday_matches(weekday, iso_date),
+                    weekday_matches=weekday_matches(weekday, date_iso),
                 )
             )
 

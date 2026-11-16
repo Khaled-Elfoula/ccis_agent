@@ -31,8 +31,8 @@ name. A name that only partly matches comes back as **candidates, not confirmed*
    with the link. Nothing invented.
 
 4. **"What are the office and email of Dr. Saad Abdullah AlAhmadi?"**
-   `find_contact` returns office 31 / 2179, salahmadi@ksu.edu.sa with `email_source: scraped`, and the
-   profile link `faculty.ksu.edu.sa/ar/salahmadi`.
+   `find_contact` returns office 31 / 2179, salahmadi@ksu.edu.sa and the profile link
+   `faculty.ksu.edu.sa/ar/salahmadi`. Nothing invented.
 
 5. **"And Dr. Saad Abdallah AlAhmadi?"** (misspelled)
    The same person. Name matching tolerates the missing "u" and returns the same contact details.
@@ -54,14 +54,18 @@ name. A name that only partly matches comes back as **candidates, not confirmed*
    calendar is for 2026-2027.
 
 10. **"What is the last day to drop a course?"**
-    `get_calendar` finds no such row: the university calendar page has no drop/add (الحذف والإضافة) rows.
-    The answer says it is not on the calendar page and does not guess a date.
+    `get_calendar` answers from the academic-movements page (`dar.ksu.edu.sa/ar/academictable`), not the
+    calendar page: الحذف والإضافة for the first semester ran 2026-08-18 to 2026-08-22 and comes back `past`;
+    for the second semester it runs 2027-01-04 to 2027-01-09 and comes back `upcoming`, with the days left
+    computed by the tool. The answer gives the status and the dates and does not count the days itself.
 
 11. **"I want to withdraw from a course after the deadline."**
-    A hand-off: the reason, the College Office for Educational and Academic Affairs
-    (`ccis.ksu.edu.sa/ar/student-affairs-agency-mail`), and a ready email template with
-    `[Your name]` and `[Your ID]`. That office has no published email, so the answer says the email
-    was not found and gives the page link.
+    `get_calendar` returns two different movements: a course withdrawal (الاعتذار عن مقرر دراسي / فصل دراسي,
+    open now, ending 2026-11-28) and a withdrawal from the university (الانسحاب من الجامعة, open now, ending
+    2026-12-10). The answer says which one it is answering, then hands off: the reason, the College Office
+    for Educational and Academic Affairs (`ccis.ksu.edu.sa/ar/student-affairs-agency-mail`), and a ready
+    email template with `[Your name]` and `[Your ID]`. That office has no published email, so the answer says
+    the email was not found and gives the page link.
 
 12. **"What's the cafeteria menu?"**
     Out of scope. The agent declines and says what it can help with. No tool call, no invented answer.
@@ -69,8 +73,10 @@ name. A name that only partly matches comes back as **candidates, not confirmed*
 ## Commands
 
 ```bash
-py -m scrapers.run --all                   # college pages, faculty lists and calendar, then row counts
-py -m scrapers.run --calendar              # just the academic calendar
+py -m scrapers.run --all                   # every source below plus row counts
+py -m scrapers.run --calendar              # only the academic calendar
+py -m scrapers.run --deadlines             # only the academic-movements table
+py -m scrapers.run --catalog               # only the SE course catalog
 py -m scrapers.run --faculty --resume      # faculty lists and profiles (skips downloaded profiles)
 py scripts/report_faculty.py               # data report: counts, coverage, contacts
 py scripts/prepare_deploy.py               # checkpoint the DB, show its size, print the git commands
@@ -79,9 +85,10 @@ py scripts/demo_check.py                   # run the twelve messages through the
 py main.py                                 # start the Telegram bot
 ```
 
-`--all` refreshes the college pages, the five faculty lists and the calendar, then prints the row count of
-each table. It does **not** fetch profiles; use `--faculty` for those. Faculty profile scraping is paused: the
-host was throttling profile requests, so the stored 314 rows stay as they are.
+`--all` refreshes the college pages, the five faculty lists, the calendar, the academic-movements table and
+the course catalog, then prints the row count of each table. It does **not** fetch profiles; use `--faculty`
+for those. Faculty profile scraping is paused: the host was throttling profile requests, so the stored 314
+rows stay as they are.
 
 The database is refreshed by hand and then committed. The bot never scrapes on a schedule and never while a
 user waits.

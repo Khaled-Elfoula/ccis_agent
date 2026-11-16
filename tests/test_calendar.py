@@ -178,7 +178,8 @@ def test_get_calendar_filters_by_term(tmp_path):
     path = calendar_db(tmp_path)
     first = get_calendar(term="الفصل الدراسي الأول", db_path=path)
     short = get_calendar(term="الأول", db_path=path)
-    assert len(first) == len(short) == 9
+    # The tool returns at most CALENDAR_LIMIT rows, so both calls are capped the same way.
+    assert len(first) == len(short) == tools_module.CALENDAR_LIMIT
     assert all(row["term"] == "الفصل الدراسي الأول" for row in first)
 
 
@@ -189,8 +190,11 @@ def test_get_calendar_marks_past_rows_and_can_hide_them(tmp_path):
         "بداية الدراسة", upcoming_only=True, db_path=path, today=date(2026, 11, 15)
     )
     assert len(upcoming) < len(every)
-    assert all(not row["is_past"] for row in upcoming)
-    assert any(row["is_past"] for row in every)
+    assert all(row["status"] != "past" for row in upcoming)
+    assert any(row["status"] == "past" for row in every)
+    assert all(
+        row["days_until_start"] >= 0 for row in upcoming if row["status"] == "upcoming"
+    )
 
 
 def test_get_calendar_reports_a_missing_row_and_an_empty_calendar(tmp_path):

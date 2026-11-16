@@ -189,7 +189,7 @@ def test_case4_booking_request_offers_hours_and_email_without_booking(faculty_db
     result = tool_results(client)[0]
     assert result["no_office_hours"] is True
     assert result["email"] == "swakeel@ksu.edu.sa"
-    assert result["email_source"] == "scraped"
+    assert "email_source" not in result
     assert "I can't book it" in answer
     assert not {"book", "reserve", "appointment", "schedule_meeting"} & set(HANDLERS)
 
