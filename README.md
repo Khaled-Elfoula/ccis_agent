@@ -37,6 +37,7 @@ python -m scrapers.run --all        # every source below plus row counts
 python -m scrapers.run --calendar   # only the academic calendar
 python -m scrapers.run --deadlines  # only the academic-movements table
 python -m scrapers.run --catalog    # only the SE course catalog
+python -m scrapers.run --programs   # only the three degree-program pages
 python -m scrapers.run --faculty    # faculty lists and profiles (slow; respects throttling)
 ```
 

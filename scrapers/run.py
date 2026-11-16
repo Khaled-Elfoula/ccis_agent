@@ -11,7 +11,7 @@ import config
 import db as database
 from agent.arabic import search_form
 from agent.names import normalize_name
-from scrapers import catalog, ccis, faculty, profiles
+from scrapers import catalog, ccis, faculty, profiles, programs
 from scrapers import calendar as ksu_calendar
 from scrapers import deadlines as academic_table
 from scrapers.base import CACHE_DIR, ScrapeError, fetch
@@ -37,8 +37,12 @@ TABLES = (
     "calendar_events",
     "academic_deadlines",
     "courses",
+    "programs",
 )
 
+PROGRAM_SOURCE_IDS = tuple(
+    source.id for source in SOURCES if source.id.startswith("ccis_programs_")
+)
 
 def store_page(conn, source_id: str, url: str, parsed: ccis.ParsedPage) -> int:
     """Replace a page and its chunks in one transaction; return the chunk count."""
@@ -74,6 +78,9 @@ def scrape_pages(conn, only: set[str] | None = None, force: bool = False) -> int
             fetched = fetch(source.id, source.url, force=force)
             parsed = ccis.parse(fetched.html)
             count = store_page(conn, source.id, source.url, parsed)
+            if source.id in PROGRAM_SOURCE_IDS:
+                rows = programs.parse(fetched.html, programs.DEGREES[source.id], source.url)
+                store_programs(conn, rows, source.url)
         except (ScrapeError, ccis.ParseError) as exc:
             logger.error("%s: %s (existing data kept)", source.id, exc)
             failures += 1
@@ -298,6 +305,58 @@ def run_catalog(force: bool = False) -> int:
     finally:
         conn.close()
 
+PROGRAMS_INSERT = """
+INSERT INTO programs (
+  degree, department, name_ar, name_en, requirements_ar, source_url, scraped_at
+) VALUES (?, ?, ?, ?, ?, ?, ?)
+"""
+
+
+def store_programs(conn, rows, source_url: str, scraped_at: str | None = None) -> int:
+    """Replace one program page's rows after a successful parse."""
+    scraped_at = scraped_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with conn:
+        conn.execute("DELETE FROM programs WHERE source_url = ?", (source_url,))
+        conn.executemany(
+            PROGRAMS_INSERT,
+            [
+                (
+                    row.degree,
+                    row.department,
+                    row.name_ar,
+                    row.name_en,
+                    row.requirements_ar,
+                    source_url,
+                    scraped_at,
+                )
+                for row in rows
+            ],
+        )
+    return len(rows)
+
+
+def scrape_programs(only: set[str] | None = None, force: bool = False) -> int:
+    """Scrape the three degree-program pages, returning the number of failures."""
+    conn = database.init_db(config.DB_PATH)
+    failures = 0
+    try:
+        for source_id in PROGRAM_SOURCE_IDS:
+            if only and source_id not in only:
+                continue
+            source = SOURCES_BY_ID[source_id]
+            try:
+                fetched = fetch(source.id, source.url, force=force)
+                rows = programs.parse(fetched.html, programs.DEGREES[source.id], source.url)
+            except (ScrapeError, ccis.ParseError) as exc:
+                logger.error("%s: %s (existing data kept)", source.id, exc)
+                failures += 1
+                continue
+            count = store_programs(conn, rows, source.url)
+            print(f"{source.id:24} {count:3} programs  {programs.DEGREES[source.id]}")
+    finally:
+        conn.close()
+    return failures
+
 def table_counts(conn) -> dict[str, int]:
     """Row count per table, in a stable order."""
     return {table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in TABLES}
@@ -330,14 +389,15 @@ def main() -> None:
     parser.add_argument(
         "--all",
         action="store_true",
-        help="College pages, faculty lists, calendar, academic table and catalog (not profiles),"
-        " then row counts",
+        help="College pages, faculty lists, calendar, academic table, catalog and programs"
+        " (not profiles), then row counts",
     )
     parser.add_argument("--calendar", action="store_true", help="Scrape only the academic calendar")
     parser.add_argument(
         "--deadlines", action="store_true", help="Scrape only the academic-movements table"
     )
     parser.add_argument("--catalog", action="store_true", help="Scrape only the SE course catalog")
+    parser.add_argument("--programs", action="store_true", help="Scrape only degree programs")
     parser.add_argument("--max-profiles", type=int, help="Fetch at most this many profiles")
     parser.add_argument(
         "--resume", action="store_true", help="Skip profiles already downloaded"
@@ -352,6 +412,7 @@ def main() -> None:
             CALENDAR.id,
             DEADLINES.id,
             COURSE_CATALOG.id,
+            *PROGRAM_SOURCE_IDS,
         }
     elif args.calendar:
         known = {CALENDAR.id}
@@ -361,6 +422,8 @@ def main() -> None:
         known = {COURSE_CATALOG.id}
     elif args.faculty:
         known = set(FACULTY_LISTS_BY_ID)
+    elif args.programs:
+        known = set(PROGRAM_SOURCE_IDS)
     else:
         known = set(SOURCES_BY_ID)
     unknown = (only or set()) - known
@@ -374,6 +437,8 @@ def main() -> None:
         raise SystemExit(1 if run_deadlines(args.force) else 0)
     if args.catalog:
         raise SystemExit(1 if run_catalog(args.force) else 0)
+    if args.programs:
+        raise SystemExit(1 if scrape_programs(only, args.force) else 0)
     if args.faculty:
         raise SystemExit(1 if run_faculty(only, args.force, args.max_profiles, args.resume) else 0)
     raise SystemExit(1 if run(only, args.force) else 0)
@@ -429,10 +494,12 @@ def store_faculty(
         profile.name_en if profile else None,
         existing["name_en"] if existing else None,
     )
-    # A freshly scraped email always wins and is labelled scraped. When the page has no
-    # email, keep the one we already had (a derived one included) and its label.
+    # A freshly scraped profile email always wins, then a list-page email, then the one
+    # already stored. A profile page without an email must not drop a derived address.
     if profile is not None and profile.email:
         email, email_source = profile.email, "scraped"
+    elif row is not None and row.email:
+        email, email_source = row.email, "scraped"
     elif existing is not None and existing["email"]:
         email, email_source = existing["email"], existing["email_source"] or "scraped"
     else:
@@ -545,7 +612,7 @@ def scrape_lists(
         for row in rows:
             store_faculty(conn, row.username, scraped_at, row=row)
         print(f"{faculty_list.id:22} {len(rows):3} people  {faculty_list.department}")
-        usernames.extend(row.username for row in rows)
+        usernames.extend(row.username for row in rows if row.profile_url)
     return failures, usernames
 
 

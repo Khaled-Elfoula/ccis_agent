@@ -158,7 +158,7 @@ def directory(tmp_path, monkeypatch):
     return path
 
 
-def test_find_contact_returns_one_person_with_source_and_date(directory):
+def test_find_contact_returns_one_person_without_source_metadata(directory):
     results = find_contact("د. سعد الاحمدي", db_path=directory)
     assert len(results) == 1
     person = results[0]
@@ -169,8 +169,8 @@ def test_find_contact_returns_one_person_with_source_and_date(directory):
     assert (person["building"], person["room"]) == ("31", "2179")
     assert person["email"] == "salahmadi@ksu.edu.sa"
     assert person["profile_url"] == "https://faculty.ksu.edu.sa/ar/salahmadi"
-    assert person["source_url"].endswith("/cs/faculty-and-staff")
-    assert person["scraped_at"] == "2026-11-10T10:00:00+00:00"
+    assert "source_url" not in person
+    assert "scraped_at" not in person
 
 
 def test_find_contact_returns_candidates_when_the_name_is_ambiguous(directory):

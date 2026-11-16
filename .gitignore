@@ -6,3 +6,10 @@ __pycache__/
 db/ccis.sqlite
 db/cache/
 _tmp/
+
+# Local scratch notes and logs
+_scratch_*
+scratch_*
+cache_list.txt
+ce_mail.txt
+*.log

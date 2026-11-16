@@ -117,9 +117,13 @@ def _contact(row: dict) -> dict:
         "room": row.get("room"),
         "email": row.get("email"),
         "profile_url": row.get("profile_url"),
-        "source_url": row.get("list_url"),
-        "scraped_at": row.get("scraped_at"),
     }
+    stamp = row.get("scraped_at")
+    if stamp and _stale(stamp):
+        record["stale"] = True
+        record["stale_note"] = (
+            f"last updated {str(stamp)[:10]}, more than {config.STALE_AFTER_DAYS} days ago"
+        )
     if row.get("name_ar") and row.get("name_en"):
         record["name_en"] = row["name_en"]
     return record
@@ -294,9 +298,13 @@ def get_office_hours(
         "office_hours": [
             {"day": row["day"], "start": row["start"], "end": row["end"]} for row in selected
         ],
-        "source_url": rows[0]["source_url"],
-        "scraped_at": rows[0]["scraped_at"],
     }
+    stamp = rows[0].get("scraped_at")
+    if stamp and _stale(stamp):
+        result["stale"] = True
+        result["stale_note"] = (
+            f"last updated {str(stamp)[:10]}, more than {config.STALE_AFTER_DAYS} days ago"
+        )
     if wanted is not None:
         result["day"] = wanted
     if len(readable) < len(rows):
@@ -310,8 +318,7 @@ GET_OFFICE_HOURS_DECLARATION = types.FunctionDeclaration(
         "Return a faculty member's published office hours, read from their profile page. "
         "Read-only: it never books, reserves or sends anything, and it does not estimate or compute "
         "free times. "
-        "Returns {faculty, office_hours: [{day, start, end}], source_url, scraped_at}, plus the "
-        "requested day when one was given. If office_hours is empty the doctor published no hours for "
+        "Returns {faculty, office_hours: [{day, start, end}]}, plus the "
         "that day; unreadable_rows counts published rows whose times could not be read. "
         "When the doctor has no published office hours at all it returns {no_office_hours: true, "
         "faculty, email, office, profile_url} instead, so you can give their email and "

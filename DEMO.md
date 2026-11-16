@@ -77,6 +77,7 @@ py -m scrapers.run --all                   # every source below plus row counts
 py -m scrapers.run --calendar              # only the academic calendar
 py -m scrapers.run --deadlines             # only the academic-movements table
 py -m scrapers.run --catalog               # only the SE course catalog
+py -m scrapers.run --programs              # only the three degree-program pages
 py -m scrapers.run --faculty --resume      # faculty lists and profiles (skips downloaded profiles)
 py scripts/report_faculty.py               # data report: counts, coverage, contacts
 py scripts/prepare_deploy.py               # checkpoint the DB, show its size, print the git commands

@@ -126,3 +126,17 @@ CREATE TABLE IF NOT EXISTS courses (
 
 CREATE UNIQUE INDEX IF NOT EXISTS courses_code_idx ON courses(code_norm);
 CREATE INDEX IF NOT EXISTS courses_number_idx ON courses(number);
+
+CREATE TABLE IF NOT EXISTS programs (
+  id INTEGER PRIMARY KEY,
+  degree TEXT NOT NULL,                 -- 'بكالوريوس' | 'ماجستير' | 'دكتوراه'
+  department TEXT,                       -- 'CS' | 'CE' | 'IT' | 'SE' | 'IS' | 'مشترك'
+  name_ar TEXT NOT NULL,                 -- as the page writes it
+  name_en TEXT,                          -- null until an English page is scraped
+  requirements_ar TEXT,                  -- admission conditions shown under the programme
+  source_url TEXT NOT NULL,
+  scraped_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS programs_source_idx ON programs(source_url);
+CREATE INDEX IF NOT EXISTS programs_degree_idx ON programs(degree);

@@ -179,17 +179,29 @@ CREATE TABLE courses (              -- from ccis.ksu.edu.sa/ar/se/se-course-cata
   name_en TEXT, description_en TEXT,  -- null until the English page is scraped
   source_url TEXT NOT NULL, scraped_at TEXT NOT NULL
 );
+
+CREATE TABLE programs (             -- from the three CCIS program pages
+  id INTEGER PRIMARY KEY,
+  degree TEXT NOT NULL,             -- 'بكالوريوس' | 'ماجستير' | 'دكتوراه'
+  department TEXT,                   -- CS | CE | IT | SE | IS | 'مشترك'
+  name_ar TEXT NOT NULL,             -- as the page writes it
+  name_en TEXT,                      -- null until an English page is scraped
+  requirements_ar TEXT,              -- admission conditions shown under the programme
+  source_url TEXT NOT NULL, scraped_at TEXT NOT NULL
+);
 ```
 
 The calendar keeps **one row per date**: `بداية ...` and `نهاية ...` are separate rows and no date range is computed or stored. The academic table keeps one row per movement, with its start and end dates as the page gives them. Both parsers check each weekday against its Gregorian date and flag a mismatch; neither corrects one.
 
 `courses` hours follow the page's `credit(lecture+lab+tutorial)` form: `3(3+0+1)` is 3 credit hours, 3 lecture hours, 0 lab hours and 1 tutorial hour a week. Prerequisites are course codes joined by `+`, or a credit-hour requirement such as `95 ساعة`, which is stored as `prerequisite_min_credit_hours` rather than as a code. Every anomaly the parser meets (an empty name, an hours text it cannot read, a duplicate code, a missing label) is reported and left unfixed.
 
+`programs` keeps one row per degree programme on the three program pages. The parser reads the department heading that precedes each programme (`CS`, `CE`, `IT`, `SE`, `IS`, or `مشترك` for the shared cybersecurity programme) and attaches the admission conditions under `شروط القبول` to the programmes of that section. The bachelor page has no admission-conditions block, so its `requirements_ar` is null. A failed parse keeps the previously stored rows.
+
 **Arabic normalization** (applied to indexed text and to queries): remove tashkeel and tatweel, unify أ إ آ → ا, ى → ي, ة → ه, fold the Persian letter forms ھ ی ک to ه ي ك, and normalize Arabic-Indic digits to ASCII.
 
 ## 8. Tools
 
-All tools return JSON. Every factual result includes `source_url` and `scraped_at`. Errors return `{"error": "..."}` and never raise into the loop. A result whose `scraped_at` is older than `STALE_AFTER_DAYS` also carries `stale: true` and a `stale_note` with its date, so the agent can say the information may have changed.
+All tools return JSON. `search_kb`, `get_calendar` and `find_course` include `source_url` and `scraped_at`; `find_contact` and `get_office_hours` return contact details without that metadata. Errors return `{"error": "..."}` and never raise into the loop. A result whose `scraped_at` is older than `STALE_AFTER_DAYS` also carries `stale: true` and a `stale_note` with its date, so the agent can say the information may have changed.
 
 | Tool | Input | Output |
 |---|---|---|
@@ -197,8 +209,8 @@ All tools return JSON. Every factual result includes `source_url` and `scraped_a
 | `get_calendar` | `topic?: str`, `term?: str`, `upcoming_only?: bool` | `[{title, term, academic_year, kind, start_date, end_date, weekdays, date_hijri, note, status, days_left_until_end?, days_until_start?, source_url, scraped_at}]`, from `calendar_events` and `academic_deadlines` together |
 | `find_course` | `query: str`, `level?: "bachelor"\|"graduate"` | one exact code: `{code, code_display, name, level, hours{credit, lecture, lab, tutorial, text}, prerequisites{text, codes, min_credit_hours}, corequisites{text, codes}, description, unlocks[], source_url, scraped_at}`; several matches: `[{code, name, credit_hours, description}]` (max 5) |
 | `list_courses` | `level?: "bachelor"\|"graduate"` | `[{code, name, credit_hours, level}]` |
-| `find_contact` | `person_or_role: str` | `[{name, rank, department, building, room, email, profile_url, source_url, scraped_at}]` |
-| `get_office_hours` | `faculty_name: str`, `day?: str` | `{faculty, office_hours: [{day, start, end}], source_url, scraped_at}`; or `{no_office_hours: true, faculty, email, office, profile_url}`; or `{status: "candidates, not confirmed", ...}` when the name is ambiguous |
+| `find_contact` | `person_or_role: str` | `[{name, rank, department, building, room, email, profile_url}]` |
+| `get_office_hours` | `faculty_name: str`, `day?: str` | `{faculty, office_hours: [{day, start, end}]}`; or `{no_office_hours: true, faculty, email, office, profile_url}`; or `{status: "candidates, not confirmed", ...}` when the name is ambiguous |
 | `draft_email` | `to: str`, `case_summary: str`, `lang: "ar"\|"en"` | `{subject, body}` with `[Your name]`, `[Your ID]` placeholders |
 | `handoff` | `reason: str`, `contact: str`, `lang: "ar"\|"en"` | `{message}` containing reason, contact and template |
 
@@ -207,7 +219,7 @@ All tools return JSON. Every factual result includes `source_url` and `scraped_a
 **Name matching** (CCIS names are not always accurate). Normalize both sides: remove titles (د. / أ.د. / أ. / Dr / Prof), tashkeel, articles, and unify alef/ya/ta-marbuta. Score with `rapidfuzz.fuzz.token_set_ratio`. Accept automatically only if the score is >= 85 **and** the first and last name tokens both match **and** the runner-up is at least 5 points lower. Below 50 nothing matches. In between, return up to 3 `candidates` marked "candidates, not confirmed" and let the agent ask the user to pick. `data/name_overrides.json` (`{"name": "username"}`) always wins.
 
 **Office hours** (read-only, never books):
-1. If the faculty member has rows in `office_hours`, return them, optionally filtered to one day, with `source_url` and `scraped_at`. Rows whose times cannot be read (bad `HH:MM`, or end not after start) are not reported; `unreadable_rows` counts them.
+1. If the faculty member has rows in `office_hours`, return them, optionally filtered to one day, without `source_url` or `scraped_at`. Rows whose times cannot be read (bad `HH:MM`, or end not after start) are not reported; `unreadable_rows` counts them.
 2. If the person has no rows, return `{"no_office_hours": true}` with their email, office and `profile_url`, so the agent can suggest writing to them.
 3. Nothing is estimated from a timetable, and no free time is computed.
 

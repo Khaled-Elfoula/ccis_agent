@@ -5,15 +5,19 @@ from pathlib import Path
 import pytest
 from bs4 import BeautifulSoup
 
+import db as database
+from scrapers import programs
 from scrapers.ccis import ParseError, chunk_text, parse
-from scrapers.faculty import parse_office, parse_phone, parse_list
+from scrapers.faculty import FacultyRow, parse_office, parse_phone, parse_list
 from scrapers.profiles import (
+    Profile,
     parse_email,
     parse_office_address,
     parse_office_hours,
     parse_profile,
     to_24h,
 )
+from scrapers.run import store_faculty
 from scrapers.sources import username_from_url
 
 FIXTURES = Path(__file__).parent / "fixtures" / "faculty"
@@ -229,3 +233,81 @@ def test_parse_office_hours_skips_days_without_times():
     hours = parse_office_hours(section)
     assert [(hour.day, hour.start, hour.end) for hour in hours] == [("Sunday", "09:00", "11:00")]
     assert parse_office_hours(None) == []
+
+
+def test_store_faculty_keeps_a_list_email_when_the_profile_has_none(tmp_path):
+    conn = database.init_db(tmp_path / "faculty.sqlite")
+    row = FacultyRow(
+        username="listmail",
+        name="د. سعد الأحمدي",
+        department="CS",
+        profile_url="https://faculty.ksu.edu.sa/ar/listmail",
+        list_url="https://ccis.ksu.edu.sa/ar/cs/faculty-and-staff",
+        email="list@ksu.edu.sa",
+    )
+    store_faculty(conn, "listmail", "2026-11-10T10:00:00+00:00", row=row)
+    profile = Profile(source_url=row.profile_url, email=None)
+    store_faculty(conn, "listmail", "2026-11-11T10:00:00+00:00", profile=profile)
+    stored = conn.execute("SELECT email, email_source FROM faculty").fetchone()
+    assert (stored["email"], stored["email_source"]) == ("list@ksu.edu.sa", "scraped")
+    conn.close()
+
+
+def test_store_faculty_prefers_a_profile_email(tmp_path):
+    conn = database.init_db(tmp_path / "faculty.sqlite")
+    row = FacultyRow(
+        username="profilemail",
+        name="د. سعد الأحمدي",
+        department="CS",
+        profile_url="https://faculty.ksu.edu.sa/ar/profilemail",
+        list_url="https://ccis.ksu.edu.sa/ar/cs/faculty-and-staff",
+        email="list@ksu.edu.sa",
+    )
+    store_faculty(conn, "profilemail", "2026-11-10T10:00:00+00:00", row=row)
+    profile = Profile(source_url=row.profile_url, email="profile@ksu.edu.sa")
+    store_faculty(conn, "profilemail", "2026-11-11T10:00:00+00:00", profile=profile)
+    stored = conn.execute("SELECT email FROM faculty").fetchone()
+    assert stored["email"] == "profile@ksu.edu.sa"
+    conn.close()
+
+
+PROGRAMS_PAGE = """
+<div class="node__content">
+  <p><a href="/ar/cs"><b>قسم علوم الحاسب</b></a></p>
+  <p>بكالوريوس العلوم في علوم الحاسب</p>
+  <p><a href="/ar/ce"><b>قسم هندسة الحاسب</b></a></p>
+  <p>بكالوريوس العلوم في هندسة الحاسب</p>
+</div>
+"""
+
+
+def test_programs_parse_tracks_the_department():
+    rows = programs.parse(PROGRAMS_PAGE, "بكالوريوس", "https://ccis.ksu.edu.sa/ar/programs")
+    assert [(row.department, row.name_ar) for row in rows] == [
+        ("CS", "بكالوريوس العلوم في علوم الحاسب"),
+        ("CE", "بكالوريوس العلوم في هندسة الحاسب"),
+    ]
+    assert all(row.requirements_ar is None for row in rows)
+
+
+def test_programs_parse_attaches_admission_requirements():
+    html = """
+    <div class="node__content">
+      <p><a href="/ar/cs">علوم الحاسب</a></p>
+      <ul>
+        <li>درجة الماجستير في علوم الحاسب خيار الرسالة</li>
+        <li>درجة الماجستير في علوم الحاسب خيار المقررات</li>
+      </ul>
+      <p>شروط القبول</p>
+      <p>أن يكون المتقدم حاصلاً على درجة البكالوريوس.</p>
+    </div>
+    """
+    rows = programs.parse(html, "ماجستير", "https://ccis.ksu.edu.sa/ar/masters")
+    assert len(rows) == 2
+    assert all(row.department == "CS" for row in rows)
+    assert all("البكالوريوس" in (row.requirements_ar or "") for row in rows)
+
+
+def test_programs_parse_raises_when_the_page_has_no_programs():
+    with pytest.raises(ParseError):
+        programs.parse("<div class='node__content'><p>صفحة فارغة</p></div>", "بكالوريوس", "url")

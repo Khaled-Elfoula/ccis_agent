@@ -9,6 +9,7 @@ from google.genai import errors as genai_errors
 from google.genai import types
 
 import config
+from agent.answer import clean_answer, collect_urls
 from agent.arabic import detect_language
 from agent.prompts import load_system_prompt
 from agent.tools import TOOLS, execute_tool
@@ -66,7 +67,9 @@ class Agent:
         history = self._history.setdefault(chat_id, [])
         turn = [*history, types.Content(role="user", parts=[types.Part(text=text)])]
         tools: list[str] = []
-        answer = self._run(turn, detect_language(text), tools)
+        allowed_urls = collect_urls(text)
+        answer = self._run(turn, detect_language(text), tools, allowed_urls)
+        answer = clean_answer(answer, allowed_urls)
         self.last_tools[chat_id] = tools
         history.extend(
             [
@@ -78,18 +81,23 @@ class Agent:
         return answer
 
     def _run(
-        self, contents: list[types.Content], language: str = "en", tools: list[str] | None = None
+        self,
+        contents: list[types.Content],
+        language: str = "en",
+        tools: list[str] | None = None,
+        allowed_urls: set[str] | None = None,
     ) -> str:
         """Drive the tool-call loop for one turn, within the call budget."""
         seen: set[str] = set()
         calls = 0
+        allowed = allowed_urls if allowed_urls is not None else set()
         while True:
             response = self._generate(contents, with_tools=True, language=language)
             if response is None:
                 return FRIENDLY_ERROR
             function_calls = response.function_calls or []
             if not function_calls:
-                return _text(response) or FRIENDLY_ERROR
+                return clean_answer(_text(response) or FRIENDLY_ERROR, allowed)
 
             model_content = response.candidates[0].content
             if model_content is not None:
@@ -112,6 +120,7 @@ class Agent:
                     if tools is not None:
                         tools.append(call.name)
                     result = execute_tool(call.name, arguments)
+                    allowed.update(collect_urls(result))
                 contents.append(
                     types.Content(
                         role="user",

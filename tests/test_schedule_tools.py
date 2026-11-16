@@ -14,15 +14,15 @@ def test_normalize_day_accepts_english_and_arabic():
     assert normalize_day("yesterday") is None
 
 
-def test_office_hours_are_returned_with_source_and_date(faculty_db):
+def test_office_hours_are_returned_without_source_metadata(faculty_db):
     result = get_office_hours("د. سعد الاحمدي", db_path=faculty_db)
     assert result["office_hours"] == [
         {"day": "Sunday", "start": "10:00", "end": "11:00"},
         {"day": "Tuesday", "start": "12:00", "end": "13:00"},
     ]
     assert result["faculty"]["name"] == "سعد عبدالله الأحمدي"
-    assert result["source_url"] == "https://faculty.ksu.edu.sa/ar/withhours"
-    assert result["scraped_at"] == "2026-11-10T10:00:00+00:00"
+    assert "source_url" not in result
+    assert "scraped_at" not in result
     assert "no_office_hours" not in result
 
 

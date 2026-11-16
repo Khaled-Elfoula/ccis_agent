@@ -167,7 +167,8 @@ def test_case3_office_hours_are_labelled_and_nothing_is_booked(faculty_db):
     answer = agent.reply(1, "When is Dr. Saad AlAhmadi free on Sunday?")
     result = tool_results(client)[0]
     assert result["office_hours"] == [{"day": "Sunday", "start": "10:00", "end": "11:00"}]
-    assert result["source_url"] == "https://faculty.ksu.edu.sa/ar/withhours"
+    assert "source_url" not in result
+    assert "scraped_at" not in result
     assert "published office hours" in answer
     assert "Nothing was booked" in answer
 
