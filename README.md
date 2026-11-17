@@ -8,6 +8,24 @@ hands off complex cases with a contact and an email template in Arabic or Englis
 It is read-only: it never books, reserves, confirms or sends anything, and every fact it gives comes from a
 stored page with a source or profile link.
 
+## What the agent does
+
+- **College info / programs** ✓ — departments, degree programs, admission requirements and steps, transfer
+  and regulations, answered from the stored college pages (`search_kb`).
+- **Academic calendar and important dates** ✓ — add/drop, withdrawals, postponing, excuses, exams and
+  holidays, each with its status and a source link.
+- **Courses** ✓ — **SWE only**: the SE department catalog, 82 courses (`هاب` / SWE codes), credit hours,
+  prerequisites, co-requisites and description.
+- **Doctor info** ✓ — name, rank, department, email, office (building + room, e.g. `31|2115`), profile link,
+  and published office hours when they exist; otherwise it says none are published and gives the email.
+  Phone is stored in the database but not returned by any tool.
+- **Email template** ✓ — Arabic or English, with `[Your name]` / `[Your ID]` placeholders, and a contact for
+  the hand-off.
+
+Two things that are easy to leave out: general college questions (departments, forms, regulations) are
+answered too, and petitions, exceptions and appeals are handed off to the right contact instead of being
+decided. And it never books, sends, or invents a date or an email.
+
 ## Setup
 
 Python 3.11+.
