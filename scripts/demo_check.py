@@ -67,7 +67,7 @@ def main() -> int:
         if answer == FRIENDLY_ERROR:
             print(
                 "\nThe Gemini API did not answer, so the demo stopped here. "
-                "Check GEMINI_API_KEY, MODEL and MODEL_FALLBACK in .env, then run again."
+                "Check GEMINI_API_KEY, MODEL and MODEL_FALLBACKS in .env, then run again."
             )
             return 1
     return 0

@@ -117,7 +117,7 @@ def make_agent(responses, max_tool_calls: int = 4) -> tuple[Agent, FakeClient]:
         system_prompt="test prompt",
         max_tool_calls=max_tool_calls,
         history_messages=10,
-        fallback_model="",
+        fallback_models=[],
     )
     return agent, client
 

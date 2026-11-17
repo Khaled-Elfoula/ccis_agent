@@ -22,7 +22,7 @@ cp .env.example .env      # then fill in the three required values
 | `TELEGRAM_BOT_TOKEN` | Bot token from BotFather |
 | `GEMINI_API_KEY` | Google AI Studio key |
 | `MODEL` | A current Gemini Flash-class model name |
-| `MODEL_FALLBACK` | Optional second model tried when the first fails |
+| `MODEL_FALLBACKS` | Models tried in order when the main one fails; defaults to `gemini-3.5-flash-lite`, `gemini-3.8-flash`, `gemini-3.6-flash`, `Gemini 4 Hydrogen` |
 | `MAX_TOOL_CALLS` | Tool calls per user message, default 4 |
 | `HISTORY_MESSAGES` | Messages kept per chat in memory, default 10 |
 | `STALE_AFTER_DAYS` | After this many days a result is flagged as possibly changed, default 30 |
@@ -80,7 +80,7 @@ fixtures. The calendar, academic-movements and course-catalog parsers are tested
 
 | Path | What it holds |
 |---|---|
-| `agent/loop.py` | The tool-calling loop, stop rules, retries and the fallback model |
+| `agent/loop.py` | The tool-calling loop, stop rules, retries and the fallback model chain |
 | `agent/tools.py` | `search_kb`, `list_programs`, `get_calendar`, `find_contact`, `get_office_hours`, `find_course`, `list_courses`, `draft_email`, `handoff` |
 | `agent/prompts.py` | Loads the system prompt from the marked block in `agent.md` |
 | `agent/names.py`, `agent/arabic.py` | Arabic normalization and faculty name matching |

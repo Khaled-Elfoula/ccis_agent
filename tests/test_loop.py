@@ -39,7 +39,7 @@ class FakeClient:
 
 
 def make_agent(
-    responses, max_tool_calls: int = 4, fallback_model: str = ""
+    responses, max_tool_calls: int = 4, fallback_models: list[str] | None = ()
 ) -> tuple[Agent, FakeClient]:
     """Build an Agent wired to a fake client."""
     client = FakeClient(responses)
@@ -49,7 +49,7 @@ def make_agent(
         system_prompt="test prompt",
         max_tool_calls=max_tool_calls,
         history_messages=10,
-        fallback_model=fallback_model,
+        fallback_models=fallback_models,
     )
     return agent, client
 
@@ -132,7 +132,7 @@ def test_uses_the_fallback_model_after_the_main_one_fails(monkeypatch):
         code=429, response_json={"error": {"code": 429, "message": "rate limit"}}
     )
     agent, client = make_agent(
-        [rate_limited, rate_limited, text_response("تم")], fallback_model="backup-model"
+        [rate_limited, rate_limited, text_response("تم")], fallback_models=["backup-model"]
     )
     assert agent.reply(1, "hi") == "تم"
     assert [request["model"] for request in client.requests] == [
@@ -142,24 +142,53 @@ def test_uses_the_fallback_model_after_the_main_one_fails(monkeypatch):
     ]
 
 
-def test_friendly_message_when_the_fallback_also_fails(monkeypatch):
+def test_walks_the_fallback_chain_in_order(monkeypatch):
+    """The fallbacks are tried one by one, in the configured order, until one answers."""
     monkeypatch.setattr(loop_module.time, "sleep", lambda _: None)
     rate_limited = errors.APIError(
         code=429, response_json={"error": {"code": 429, "message": "rate limit"}}
     )
-    agent, client = make_agent([rate_limited] * 3, fallback_model="backup-model")
-    assert agent.reply(1, "hi") == FRIENDLY_ERROR
-    assert len(client.requests) == 3
+    agent, client = make_agent(
+        [rate_limited, rate_limited, rate_limited, rate_limited, text_response("تم")],
+        fallback_models=["first-model", "second-model", "third-model"],
+    )
+    assert agent.reply(1, "hi") == "تم"
+    assert [request["model"] for request in client.requests] == [
+        "test-model",
+        "test-model",
+        "first-model",
+        "second-model",
+        "third-model",
+    ]
 
 
-def test_no_fallback_call_when_both_models_are_the_same(monkeypatch):
+def test_friendly_message_when_every_model_in_the_chain_fails(monkeypatch):
     monkeypatch.setattr(loop_module.time, "sleep", lambda _: None)
     rate_limited = errors.APIError(
         code=429, response_json={"error": {"code": 429, "message": "rate limit"}}
     )
-    agent, client = make_agent([rate_limited, rate_limited], fallback_model="test-model")
+    agent, client = make_agent(
+        [rate_limited] * 5, fallback_models=["first-model", "second-model", "third-model"]
+    )
     assert agent.reply(1, "hi") == FRIENDLY_ERROR
-    assert len(client.requests) == 2
+    assert len(client.requests) == 5
+
+
+def test_the_chain_skips_the_main_model_and_repeats():
+    agent, _ = make_agent([], fallback_models=["test-model", "backup-model", "backup-model", " "])
+    assert agent.fallback_models == ["backup-model"]
+
+
+def test_a_working_main_model_never_reaches_the_chain():
+    agent, client = make_agent([text_response("تم")], fallback_models=["backup-model"])
+    assert agent.reply(1, "hi") == "تم"
+    assert [request["model"] for request in client.requests] == ["test-model"]
+
+
+def test_the_chain_comes_from_the_config_by_default(monkeypatch):
+    monkeypatch.setattr(loop_module.config, "MODEL_FALLBACKS", ["backup-a", "backup-b"])
+    agent, _ = make_agent([], fallback_models=None)
+    assert agent.fallback_models == ["backup-a", "backup-b"]
 
 
 def test_english_message_asks_for_an_english_reply():

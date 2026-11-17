@@ -51,7 +51,7 @@ Telegram ─► bot/telegram.py ─► agent/loop.py ─► agent/tools.py
 
 ## 5. Stack
 
-Python 3.11+, `python-telegram-bot` (long polling), Google Gemini API through the `google-genai` Python SDK with function calling (model name set in `MODEL`; pick a current Flash-class model from Google AI Studio), `httpx` + `BeautifulSoup`, `rapidfuzz` (name matching), SQLite with FTS5, `python-dotenv`, `pytest`.
+Python 3.11+, `python-telegram-bot` (long polling), Google Gemini API through the `google-genai` Python SDK with function calling (main model in `MODEL`, ordered fallbacks in `MODEL_FALLBACKS`; pick current Flash-class names from Google AI Studio), `httpx` + `BeautifulSoup`, `rapidfuzz` (name matching), SQLite with FTS5, `python-dotenv`, `pytest`.
 
 ## 6. Project layout
 
@@ -249,7 +249,7 @@ loop:
 - Repeat guard: reject a call with identical tool and arguments to an earlier one in the same turn.
 - Tool results are wrapped as data. Scraped text is never treated as instructions.
 - Per-chat history is in memory only and cleared on restart or `/reset`.
-- Each turn logs the chat id, the time, the intent and the tools called — never the message text.
+- Model fallback: the main model is retried once on a transient error, then each model in `MODEL_FALLBACKS` is tried once, in the order listed.
 
 ## 10. Telegram behavior
 
@@ -260,7 +260,7 @@ loop:
 - Replies are plain text, split if longer than 4000 characters.
 - Non-text messages: reply that only text is supported.
 - Basic rate limit: 10 messages per minute per chat.
-- If both the main and the fallback model fail, reply with one short bilingual apology.
+- If every model fails (the main one and each fallback in `MODEL_FALLBACKS`), reply with one short bilingual apology.
 
 ## 11. Scraping rules
 
@@ -310,7 +310,7 @@ Allowed hosts: `ccis.ksu.edu.sa`, `cs.ksu.edu.sa`, `fac.ksu.edu.sa`, `faculty.ks
 TELEGRAM_BOT_TOKEN=
 GEMINI_API_KEY=
 MODEL=            # a current Gemini Flash-class model name from Google AI Studio
-MODEL_FALLBACK=
+MODEL_FALLBACKS=   # comma-separated, tried in order
 MAX_TOOL_CALLS=4
 HISTORY_MESSAGES=10
 STALE_AFTER_DAYS=30

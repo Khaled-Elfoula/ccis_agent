@@ -45,11 +45,13 @@ class Agent:
         system_prompt: str | None = None,
         max_tool_calls: int | None = None,
         history_messages: int | None = None,
-        fallback_model: str | None = None,
+        fallback_models: list[str] | None = None,
     ) -> None:
         self.client = client or genai.Client(api_key=config.GEMINI_API_KEY)
         self.model = model or config.MODEL
-        self.fallback_model = config.MODEL_FALLBACK if fallback_model is None else fallback_model
+        self.fallback_models = _fallback_chain(
+            self.model, config.MODEL_FALLBACKS if fallback_models is None else fallback_models
+        )
         self.system_prompt = system_prompt or load_system_prompt()
         self.max_tool_calls = config.MAX_TOOL_CALLS if max_tool_calls is None else max_tool_calls
         self.history_messages = (
@@ -142,18 +144,18 @@ class Agent:
         return (_text(response) if response is not None else "") or FRIENDLY_ERROR
 
     def _generate(self, contents: list[types.Content], with_tools: bool, language: str = "en"):
-        """Call the model, retrying once, then try the fallback model once."""
+        """Call the main model, retrying once, then each fallback model in order."""
         generation_config = types.GenerateContentConfig(
             system_instruction=_system_instruction(self.system_prompt, language),
             temperature=0.3,
             tools=TOOLS if with_tools else None,
         )
         response = self._call(self.model, contents, generation_config, attempts=2)
-        if response is None and self.fallback_model and self.fallback_model != self.model:
-            logger.warning(
-                "main model %s failed, trying fallback %s", self.model, self.fallback_model
-            )
-            response = self._call(self.fallback_model, contents, generation_config, attempts=1)
+        for model in self.fallback_models:
+            if response is not None:
+                break
+            logger.warning("model %s failed, trying fallback %s", self.model, model)
+            response = self._call(model, contents, generation_config, attempts=1)
         return response
 
     def _call(self, model: str, contents: list[types.Content], generation_config, attempts: int):
@@ -187,6 +189,17 @@ def _is_retryable(exc: genai_errors.APIError) -> bool:
     """True for rate limits and transient server errors."""
     code = getattr(exc, "code", None)
     return code in RETRYABLE_STATUS or "429" in str(exc)
+
+
+def _fallback_chain(main: str, models: list[str] | None) -> list[str]:
+    """The models to try after the main one, in order, without blanks or repeats."""
+    chain: list[str] = []
+    for value in models or []:
+        model = (value or "").strip()
+        if model and model != main and model not in chain:
+            chain.append(model)
+    return chain
+
 
 def _system_instruction(base: str, language: str) -> str:
     """Add the per-message language rule to the system prompt."""
